@@ -1,0 +1,29 @@
+{
+  "ollama": {
+    "baseUrl": "http://127.0.0.1:11434",
+    "embeddingModel": "nomic-embed-text",  
+    "chatModel": "qwen3:4b",               
+    "temperature": 0.2
+  },
+  "documents": {
+    "docsDir": ".docs",
+    "chunkSize": 1000,
+    "chunkOverlap": 200
+  },
+  "retrieval": {
+    "topK": 4
+  },
+  "vectorStore": {
+    "type": "milvus",
+    "persistDir": "data/vectorstore"
+  },
+  "milvus": {
+    "url": "http://127.0.0.1:19530",
+    "username": "",
+    "password": "",
+    "ssl": false,
+    "collectionName": "langchain_docs",
+    "partitionName": "",
+    "textFieldMaxLength": 65535
+  }
+}

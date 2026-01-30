@@ -15,17 +15,25 @@ import readline from "node:readline";
 import { loadDocuments, splitDocuments } from "./loadDocs.js";
 import { buildOrLoadVectorStore, deleteVectorStore } from "./buildVectorStore.js";
 import { ask, createRagChain } from "./qa.js";
+import { config } from "./config.js";
 
 function ensureVectorStore() {
-  return buildOrLoadVectorStore(null).catch(() => {
+  return buildOrLoadVectorStore(null).catch((error) => {
+    // 如果加载失败（向量库不存在或损坏），从文档重新构建
+    console.log("📖 向量库不存在或已损坏，正在从 .docs 加载文档并构建...");
     return loadDocuments()
-      .then((docs) =>
-        splitDocuments(docs, {
-          chunkSize: process.env.CHUNK_SIZE ? Number(process.env.CHUNK_SIZE) : 1000,
-          chunkOverlap: process.env.CHUNK_OVERLAP ? Number(process.env.CHUNK_OVERLAP) : 200,
-        })
-      )
-      .then((chunks) => buildOrLoadVectorStore(chunks));
+      .then((docs) => {
+        console.log(`✅ 已加载 ${docs.length} 个文档`);
+        return splitDocuments(docs, {
+          chunkSize: config.documents.chunkSize,
+          chunkOverlap: config.documents.chunkOverlap,
+        });
+      })
+      .then((chunks) => {
+        console.log(`✅ 文档已切分为 ${chunks.length} 个块`);
+        console.log("🔄 正在构建向量库（这可能需要一些时间）...");
+        return buildOrLoadVectorStore(chunks);
+      });
   });
 }
 
@@ -33,7 +41,7 @@ function main() {
   ensureVectorStore()
     .then((vectorStore) =>
       createRagChain(vectorStore, {
-        topK: process.env.TOP_K ? Number(process.env.TOP_K) : 4,
+        topK: config.retrieval.topK,
       })
     )
     .then((ragChain) => {
@@ -52,23 +60,30 @@ function main() {
           }
 
           if (q.toLowerCase() === "rebuild") {
-            deleteVectorStore();
-            console.log("已删除本地向量索引。现在会重新从 .docs 构建...");
+            console.log("正在删除 Milvus collection 并重建...");
+            Promise.resolve(deleteVectorStore())
+              .then(() => {
+                console.log("✅ 已删除 Milvus collection。现在会重新从 .docs 构建...");
+              })
+              .catch(() => {
+                console.log("⚠️ 删除 collection 失败或 collection 不存在，将直接重建...");
+              })
+              .then(() => {
             loadDocuments()
               .then((docs) =>
                 splitDocuments(docs, {
-                  chunkSize: process.env.CHUNK_SIZE ? Number(process.env.CHUNK_SIZE) : 1000,
-                  chunkOverlap: process.env.CHUNK_OVERLAP ? Number(process.env.CHUNK_OVERLAP) : 200,
+                  chunkSize: config.documents.chunkSize,
+                  chunkOverlap: config.documents.chunkOverlap,
                 })
               )
               .then((chunks) => buildOrLoadVectorStore(chunks))
               .then((vs) =>
                 createRagChain(vs, {
-                  topK: process.env.TOP_K ? Number(process.env.TOP_K) : 4,
+                  topK: config.retrieval.topK,
                 })
               )
               .then((newChain) => {
-                (ragChain as any).invoke = newChain.invoke.bind(newChain);
+                ragChain.invoke = newChain.invoke.bind(newChain);
                 console.log("重建完成。");
                 loop();
               })
@@ -78,6 +93,7 @@ function main() {
               });
 
             return;
+              });
           }
 
           ask(ragChain, q)
@@ -102,4 +118,3 @@ function main() {
 }
 
 void main();
-
