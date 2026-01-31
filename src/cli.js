@@ -9,32 +9,35 @@
  * - npm run dev
  */
 
+import path from "node:path";
 import "dotenv/config";
 import readline from "node:readline";
 
 import { loadDocuments, splitDocuments } from "./loadDocs.js";
-import { buildOrLoadVectorStore, deleteVectorStore } from "./buildVectorStore.js";
+import { buildOrLoadVectorStore, deleteVectorStore, showVectorStore } from "./buildVectorStore.js";
 import { ask, createRagChain } from "./qa.js";
 import { config } from "./config.js";
 
 function ensureVectorStore() {
-  return buildOrLoadVectorStore(null).catch((error) => {
-    // 如果加载失败（向量库不存在或损坏），从文档重新构建
-    console.log("📖 向量库不存在或已损坏，正在从 .docs 加载文档并构建...");
-    return loadDocuments()
-      .then((docs) => {
-        console.log(`✅ 已加载 ${docs.length} 个文档`);
-        return splitDocuments(docs, {
-          chunkSize: config.documents.chunkSize,
-          chunkOverlap: config.documents.chunkOverlap,
-        });
-      })
-      .then((chunks) => {
-        console.log(`✅ 文档已切分为 ${chunks.length} 个块`);
-        console.log("🔄 正在构建向量库（这可能需要一些时间）...");
-        return buildOrLoadVectorStore(chunks);
+  return loadDocuments()
+    .then((docs) => {
+      docs.forEach(doc => {
+        doc.metadata.source = path.relative(process.cwd(), doc.metadata.source);
       });
-  });
+      console.log(`✅ 已加载 ${docs.length} 个文档`);
+      return splitDocuments(docs, {
+        chunkSize: config.documents.chunkSize,
+        chunkOverlap: config.documents.chunkOverlap,
+      });
+    })
+    .then((chunks) => {
+      console.log(`✅ 文档已切分为 ${chunks.length} 个块`);
+      return buildOrLoadVectorStore(chunks);
+    })
+    .catch((error) => {
+      console.error("📖 加载文档或构建向量库失败:", error);
+      throw error;
+    });
 }
 
 function main() {
@@ -59,6 +62,35 @@ function main() {
             return;
           }
 
+          if (q.toLowerCase() === "show") {
+            console.log("🔍 正在查询向量数据库内容...");
+            showVectorStore()
+              .then((data) => {
+                if (data.length === 0) {
+                  console.log("ℹ️ 数据库为空，没有可显示的内容。");
+                } else {
+                  console.log(`✅ 查询到 ${data.length} 条记录 (最多显示 5 条):`);
+                  data.forEach((item, index) => {
+                    console.log(`\n--- [ 记录 ${index + 1} ] ---`);
+                    Object.keys(item).forEach(key => {
+                      let value = item[key];
+                      if (typeof value === 'string' && value.length > 200) {
+                        value = value.substring(0, 200) + '...';
+                      }
+                      console.log(`${key}: ${value}`);
+                    });
+                  });
+                }
+              })
+              .catch((err) => {
+                console.error("❌ 查询失败:", err.message);
+              })
+              .finally(() => {
+                loop();
+              });
+            return;
+          }
+
           if (q.toLowerCase() === "rebuild") {
             console.log("正在删除 Milvus collection 并重建...");
             Promise.resolve(deleteVectorStore())
@@ -70,12 +102,15 @@ function main() {
               })
               .then(() => {
             loadDocuments()
-              .then((docs) =>
-                splitDocuments(docs, {
+              .then((docs) => {
+                docs.forEach(doc => {
+                  doc.metadata.source = path.relative(process.cwd(), doc.metadata.source);
+                });
+                return splitDocuments(docs, {
                   chunkSize: config.documents.chunkSize,
                   chunkOverlap: config.documents.chunkOverlap,
                 })
-              )
+              })
               .then((chunks) => buildOrLoadVectorStore(chunks))
               .then((vs) =>
                 createRagChain(vs, {
@@ -94,6 +129,7 @@ function main() {
 
             return;
               });
+            return;
           }
 
           ask(ragChain, q)
