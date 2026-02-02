@@ -12,27 +12,63 @@
 import path from "node:path";
 import "dotenv/config";
 import readline from "node:readline";
+import { performance } from "node:perf_hooks";
 
 import { loadDocuments, splitDocuments } from "./loadDocs.js";
 import { buildOrLoadVectorStore, deleteVectorStore, showVectorStore } from "./buildVectorStore.js";
 import { ask, createRagChain } from "./qa.js";
 import { config } from "./config.js";
 
+function time(label, fn) {
+  const start = performance.now();
+  console.log(`⏱️ [timing] ${label} start`);
+  return Promise.resolve()
+    .then(fn)
+    .then((res) => {
+      const costMs = performance.now() - start;
+      console.log(`⏱️ [timing] ${label} ${costMs.toFixed(1)}ms`);
+      return res;
+    })
+    .catch((err) => {
+      const costMs = performance.now() - start;
+      console.log(`⏱️ [timing] ${label} ${costMs.toFixed(1)}ms error`);
+      throw err;
+    });
+}
+
+async function checkOllamaReady() {
+  const baseUrl = String(config.ollama.baseUrl || "").replace(/\/+$/, "");
+  const url = `${baseUrl}/api/tags`;
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 5000);
+  try {
+    await fetch(url, { signal: controller.signal }).then((r) => r.json());
+    console.log(`✅ Ollama 可用: ${baseUrl}`);
+  } catch (e) {
+    console.error(`❌ Ollama 无响应: ${url}`);
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 function ensureVectorStore() {
-  return loadDocuments()
+  return time("loadDocuments", () => loadDocuments())
     .then((docs) => {
       docs.forEach(doc => {
         doc.metadata.source = path.relative(process.cwd(), doc.metadata.source);
       });
       console.log(`✅ 已加载 ${docs.length} 个文档`);
-      return splitDocuments(docs, {
-        chunkSize: config.documents.chunkSize,
-        chunkOverlap: config.documents.chunkOverlap,
-      });
+      return time("splitDocuments", () =>
+        splitDocuments(docs, {
+          chunkSize: config.documents.chunkSize,
+          chunkOverlap: config.documents.chunkOverlap,
+        })
+      );
     })
     .then((chunks) => {
       console.log(`✅ 文档已切分为 ${chunks.length} 个块`);
-      return buildOrLoadVectorStore(chunks);
+      return time("buildOrLoadVectorStore", () => buildOrLoadVectorStore(chunks));
     })
     .catch((error) => {
       console.error("📖 加载文档或构建向量库失败:", error);
@@ -41,11 +77,14 @@ function ensureVectorStore() {
 }
 
 function main() {
-  ensureVectorStore()
+  time("checkOllamaReady", () => checkOllamaReady())
+    .then(() => time("ensureVectorStore", () => ensureVectorStore()))
     .then((vectorStore) =>
-      createRagChain(vectorStore, {
-        topK: config.retrieval.topK,
-      })
+      time("createRagChain", () =>
+        createRagChain(vectorStore, {
+          topK: config.retrieval.topK,
+        })
+      )
     )
     .then((ragChain) => {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

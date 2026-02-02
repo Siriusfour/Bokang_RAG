@@ -8,13 +8,74 @@
 import { Milvus } from "@langchain/community/vectorstores/milvus";
 import { OllamaEmbeddings } from "@langchain/ollama";
 import { DataType } from "@zilliz/milvus2-sdk-node";
+import { performance } from "node:perf_hooks";
 import { config } from "./config.js";
 
+function normalizeMilvusAddress(raw) {
+  if (!raw) return raw;
+  if (typeof raw !== "string") return raw;
+  const trimmed = raw.trim();
+  try {
+    const u = new URL(trimmed);
+    if (u.hostname) {
+      const port = u.port || "19530";
+      return `${u.hostname}:${port}`;
+    }
+    return trimmed;
+  } catch {
+    return trimmed.replace(/^https?:\/\//i, "");
+  }
+}
+
+function monitor(label, fn, intervalMs = 10000) {
+  const start = performance.now();
+  console.log(`⏱️ [timing] ${label} start`);
+  const timer = setInterval(() => {
+    const costMs = performance.now() - start;
+    console.log(`⏱️ [timing] ${label} running ${costMs.toFixed(0)}ms`);
+  }, intervalMs);
+
+  return Promise.resolve()
+    .then(fn)
+    .then((res) => {
+      clearInterval(timer);
+      const costMs = performance.now() - start;
+      console.log(`⏱️ [timing] ${label} ${costMs.toFixed(1)}ms`);
+      return res;
+    })
+    .catch((err) => {
+      clearInterval(timer);
+      const costMs = performance.now() - start;
+      console.log(`⏱️ [timing] ${label} ${costMs.toFixed(1)}ms error`);
+      throw err;
+    });
+}
+
 export function createEmbeddings(options = {}) {
-  return new OllamaEmbeddings({
+  const embeddings = new OllamaEmbeddings({
     baseUrl: options.ollamaBaseUrl ?? config.ollama.baseUrl,
     model: options.embeddingModel ?? config.ollama.embeddingModel,
   });
+
+  if (!embeddings.__timingPatched) {
+    embeddings.__timingPatched = true;
+
+    if (typeof embeddings.embedQuery === "function") {
+      const originalEmbedQuery = embeddings.embedQuery.bind(embeddings);
+      embeddings.embedQuery = async (...args) =>
+        monitor("embeddings.embedQuery", () => originalEmbedQuery(...args));
+    }
+
+    if (typeof embeddings.embedDocuments === "function") {
+      const originalEmbedDocuments = embeddings.embedDocuments.bind(embeddings);
+      embeddings.embedDocuments = async (texts, ...rest) => {
+        const n = Array.isArray(texts) ? texts.length : 0;
+        return monitor(`embeddings.embedDocuments n=${n}`, () => originalEmbedDocuments(texts, ...rest));
+      };
+    }
+  }
+
+  return embeddings;
 }
 
 export function loadVectorStore(options = {}) {
@@ -24,7 +85,7 @@ export function loadVectorStore(options = {}) {
       collectionName: options.collectionName ?? config.milvus.collectionName,
       partitionName:
         options.partitionName ?? (config.milvus.partitionName ? config.milvus.partitionName : undefined),
-      url: options.url ?? config.milvus.url,
+      url: normalizeMilvusAddress(options.url ?? config.milvus.url),
       username: options.username ?? config.milvus.username,
       password: options.password ?? config.milvus.password,
       ssl: options.ssl ?? config.milvus.ssl,
@@ -119,9 +180,11 @@ export function showVectorStore(options = {}) {
 }
 
 async function ensureCollection(vectorStore, documents) {
-  const hasColResp = await vectorStore.client.hasCollection({
-    collection_name: vectorStore.collectionName,
-  });
+  const hasColResp = await monitor("milvus.hasCollection", () =>
+    vectorStore.client.hasCollection({
+      collection_name: vectorStore.collectionName,
+    })
+  );
   if (hasColResp.status?.error_code && hasColResp.status.error_code !== "Success") {
     throw new Error(`Error checking collection: ${JSON.stringify(hasColResp)}`);
   }
@@ -129,7 +192,7 @@ async function ensureCollection(vectorStore, documents) {
     return;
   }
 
-  const dimProbe = await vectorStore.embeddings.embedQuery("dimension_probe");
+  const dimProbe = await monitor("dimensionProbe", () => vectorStore.embeddings.embedQuery("dimension_probe"));
   const dim = Array.isArray(dimProbe) ? dimProbe.length : 0;
   if (!dim) {
     throw new Error("Failed to determine embedding dimension.");
@@ -195,27 +258,33 @@ async function ensureCollection(vectorStore, documents) {
     },
   ];
 
-  const createRes = await vectorStore.client.createCollection({
-    collection_name: vectorStore.collectionName,
-    fields,
-  });
+  const createRes = await monitor("milvus.createCollection", () =>
+    vectorStore.client.createCollection({
+      collection_name: vectorStore.collectionName,
+      fields,
+    })
+  );
   if (createRes.error_code && createRes.error_code !== "Success") {
     throw new Error(`Failed to create collection: ${JSON.stringify(createRes)}`);
   }
 
-  await vectorStore.client.createIndex({
-    collection_name: vectorStore.collectionName,
-    field_name: vectorStore.vectorField,
-    extra_params: {
-      index_type: "HNSW",
-      metric_type: "L2",
-      params: JSON.stringify({ M: 8, efConstruction: 64 }),
-    },
-  });
+  await monitor("milvus.createIndex", () =>
+    vectorStore.client.createIndex({
+      collection_name: vectorStore.collectionName,
+      field_name: vectorStore.vectorField,
+      extra_params: {
+        index_type: "HNSW",
+        metric_type: "L2",
+        params: JSON.stringify({ M: 8, efConstruction: 64 }),
+      },
+    })
+  );
 
-  await vectorStore.client.loadCollectionSync({
-    collection_name: vectorStore.collectionName,
-  });
+  await monitor("milvus.loadCollectionSync", () =>
+    vectorStore.client.loadCollectionSync({
+      collection_name: vectorStore.collectionName,
+    })
+  );
 }
 
 
@@ -235,9 +304,11 @@ export async function buildOrLoadVectorStore(documents, options = {}) {
 
     if (exists) {
       console.log(`✅ Milvus collection "${collectionName}" 已存在，直接使用`);
-      await vectorStore.client.loadCollectionSync({
-        collection_name: collectionName,
-      });
+      await monitor("milvus.loadCollectionSync(existing)", () =>
+        vectorStore.client.loadCollectionSync({
+          collection_name: collectionName,
+        })
+      );
       return vectorStore;
     }
 
@@ -248,8 +319,8 @@ export async function buildOrLoadVectorStore(documents, options = {}) {
     }
 
     console.log(`🔄 Milvus collection "${collectionName}" 不存在，正在创建并插入数据...`);
-    await ensureCollection(vectorStore, documents);
-    await vectorStore.addDocuments(documents);
+    await monitor("ensureCollection", () => ensureCollection(vectorStore, documents));
+    await monitor(`vectorStore.addDocuments n=${documents.length}`, () => vectorStore.addDocuments(documents));
     console.log("✅ Collection 创建并插入成功");
     return vectorStore;
 
