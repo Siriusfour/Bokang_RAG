@@ -113,4 +113,15 @@ export const config = {
      */
     textFieldMaxLength: getConfig("milvus.textFieldMaxLength", "MILVUS_TEXT_FIELD_MAX_LENGTH", 65535),
   },
+  redis: {
+    url: getConfig("redis.url", "REDIS_URL", "redis://127.0.0.1:6379"),
+    username: getConfig("redis.username", "REDIS_USERNAME", ""),
+    password: getConfig("redis.password", "REDIS_PASSWORD", ""),
+    db: getConfig("redis.db", "REDIS_DB", 0),
+    keyPrefix: getConfig("redis.keyPrefix", "REDIS_KEY_PREFIX", "rag:mem:"),
+    ttlSeconds: getConfig("redis.ttlSeconds", "REDIS_TTL_SECONDS", 2592000),
+    maxValueBytes: getConfig("redis.maxValueBytes", "REDIS_MAX_VALUE_BYTES", 524288),
+    summaryKeepLastN: getConfig("redis.summaryKeepLastN", "REDIS_SUMMARY_KEEP_LAST_N", 6),
+    summaryPrefix: getConfig("redis.summaryPrefix", "REDIS_SUMMARY_PREFIX", "对话摘要："),
+  },
 };

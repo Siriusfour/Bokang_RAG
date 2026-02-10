@@ -25,5 +25,16 @@
     "collectionName": "langchain_docs",
     "partitionName": "",
     "textFieldMaxLength": 65535
+  },
+  "redis": {
+    "url": "redis://127.0.0.1:6379",
+    "username": "",
+    "password": "",
+    "db": 0,
+    "keyPrefix": "rag:mem:",
+    "ttlSeconds": 2592000,
+    "maxValueBytes": 524288,
+    "summaryKeepLastN": 6,
+    "summaryPrefix": "对话摘要："
   }
 }

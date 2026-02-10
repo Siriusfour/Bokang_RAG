@@ -16,7 +16,7 @@ import { performance } from "node:perf_hooks";
 
 import { loadDocuments, splitDocuments } from "./loadDocs.js";
 import { buildOrLoadVectorStore, deleteVectorStore, showVectorStore } from "./buildVectorStore.js";
-import { ask, createRagChain } from "./qa.js";
+import { ask, createRagGraph } from "./qa.js";
 import { config } from "./config.js";
 
 function time(label, fn) {
@@ -80,19 +80,27 @@ function main() {
   time("checkOllamaReady", () => checkOllamaReady())
     .then(() => time("ensureVectorStore", () => ensureVectorStore()))
     .then((vectorStore) =>
-      time("createRagChain", () =>
-        createRagChain(vectorStore, {
+      time("createRagGraph", () =>
+        createRagGraph(vectorStore, {
           topK: config.retrieval.topK,
         })
       )
     )
-    .then((ragChain) => {
+    .then((ragApp) => {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      let isClosed = false;
+      rl.on("close", () => {
+        isClosed = true;
+      });
+      const threadId = String(process.env.THREAD_ID || "default");
+      let state = { threadId, messages: [] };
 
       console.log("本地知识库 RAG CLI 已启动。输入问题；exit 退出；rebuild 重建索引。");
 
       const loop = () => {
+        if (isClosed) return;
         rl.question("你：", (input) => {
+          if (isClosed) return;
           const q = input.trim();
           if (!q) return loop();
 
@@ -152,12 +160,12 @@ function main() {
               })
               .then((chunks) => buildOrLoadVectorStore(chunks))
               .then((vs) =>
-                createRagChain(vs, {
+                createRagGraph(vs, {
                   topK: config.retrieval.topK,
                 })
               )
-              .then((newChain) => {
-                ragChain.invoke = newChain.invoke.bind(newChain);
+              .then((newApp) => {
+                ragApp.invoke = newApp.invoke.bind(newApp);
                 console.log("重建完成。");
                 loop();
               })
@@ -171,8 +179,9 @@ function main() {
             return;
           }
 
-          ask(ragChain, q)
+          ask(ragApp, state, q)
             .then((res) => {
+              state = res.state;
               console.log(`助手：${res.answer}`);
             })
             .catch((err) => {

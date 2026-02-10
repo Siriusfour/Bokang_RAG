@@ -13,6 +13,10 @@ import readline from "node:readline";
 import { loadDocuments, splitDocuments } from "./loadDocs.js";
 import { buildOrLoadVectorStore, deleteVectorStore } from "./buildVectorStore.js";
 import { ask, createRagChain } from "./qa.js";
+import { createAgent } from "@langchain/langgraph";
+import { ChatOpenAI } from "@langchain/openai";
+
+
 function ensureVectorStore() {
     return buildOrLoadVectorStore(null).catch(() => {
         return loadDocuments()
@@ -30,7 +34,7 @@ function main() {
     }))
         .then((ragChain) => {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        console.log("本地知识库 RAG CLI 已启动。输入问题；exit 退出；rebuild 重建索引。");
+        console.log("本地知识库 RAG CLI 已启动。输入问题；exit 退出；rebuild 重建索引 ；show 显示索引。");
         const loop = () => {
             rl.question("你：", (input) => {
                 const q = input.trim();
