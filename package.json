@@ -17,8 +17,8 @@
     "@langchain/textsplitters": "^1.0.1",
     "@zilliz/milvus2-sdk-node": "^2.6.0",
     "dotenv": "^16.4.5",
-    "hnswlib-node": "^3.0.0",
     "langchain": "^1.2.18",
+    "mammoth": "^1.11.0",
     "pdf-parse": "^1.1.1",
     "redis": "^5.10.0",
     "zod-to-json-schema": "^3.24.6"

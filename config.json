@@ -1,14 +1,14 @@
 {
   "ollama": {
     "baseUrl": "http://127.0.0.1:11434",
-    "embeddingModel": "nomic-embed-text",  
-    "chatModel": "qwen3:4b",               
+    "embeddingModel": "bge-m3",  
+    "chatModel": "deepseek-r1:14b",               
     "temperature": 0.2
   },
   "documents": {
     "docsDir": ".docs",
     "chunkSize": 1000,
-    "chunkOverlap": 200
+    "chunkOverlap": 20
   },
   "retrieval": {
     "topK": 4

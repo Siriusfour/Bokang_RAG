@@ -63,6 +63,7 @@ function ensureVectorStore() {
         splitDocuments(docs, {
           chunkSize: config.documents.chunkSize,
           chunkOverlap: config.documents.chunkOverlap,
+          chunkByHeading: true,
         })
       );
     })
@@ -156,6 +157,7 @@ function main() {
                 return splitDocuments(docs, {
                   chunkSize: config.documents.chunkSize,
                   chunkOverlap: config.documents.chunkOverlap,
+                  chunkByHeading: true,
                 })
               })
               .then((chunks) => buildOrLoadVectorStore(chunks))

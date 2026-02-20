@@ -70,7 +70,7 @@ function getConfig(path, envVar, defaultValue) {
   }
   
   // 返回默认值
-  return defaultValue;
+  return defaultValue;  
 }
 
 /**
