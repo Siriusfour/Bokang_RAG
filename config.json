@@ -3,7 +3,10 @@
     "baseUrl": "http://127.0.0.1:11434",
     "embeddingModel": "bge-m3",  
     "chatModel": "deepseek-r1:14b",               
-    "temperature": 0.2
+    "temperature": 0.2,
+    "apiKey": "sk-803aead73a1e4f61889fdc502d4f332c",
+    "modelUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "modelName": "qwen-plus"
   },
   "documents": {
     "docsDir": ".docs",

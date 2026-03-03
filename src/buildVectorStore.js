@@ -59,6 +59,26 @@ function monitor(label, fn, intervalMs = 10000) {
     });
 }
 
+function withTimeout(promise, timeoutMs, label) {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return promise;
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+    Promise.resolve(promise)
+      .then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 
 // 创建 Embeddings，并为 embedQuery / embedDocuments 注入耗时监控
 export function createEmbeddings(options = {}) {
@@ -311,9 +331,13 @@ async function ensureCollection(vectorStore, documents) {
 
   // 加载 collection 以便后续查询
   await monitor("milvus.loadCollectionSync", () =>
-    vectorStore.client.loadCollectionSync({
-      collection_name: vectorStore.collectionName,
-    })
+    withTimeout(
+      vectorStore.client.loadCollectionSync({
+        collection_name: vectorStore.collectionName,
+      }),
+      60000,
+      "milvus.loadCollectionSync"
+    )
   );
 }
 
@@ -335,12 +359,30 @@ export async function buildOrLoadVectorStore(documents, options = {}) {
 
     if (exists) {
       console.log(`✅ Milvus collection "${collectionName}" 已存在，直接使用`);
-      await monitor("milvus.loadCollectionSync(existing)", () =>
-        vectorStore.client.loadCollectionSync({
-          collection_name: collectionName,
-        })
-      );
-      return vectorStore;
+      try {
+        await monitor("milvus.loadCollectionSync(existing)", () =>
+          withTimeout(
+            vectorStore.client.loadCollectionSync({
+              collection_name: collectionName,
+            }),
+            60000,
+            "milvus.loadCollectionSync(existing)"
+          )
+        );
+        return vectorStore;
+      } catch (err) {
+        console.error("❌ Milvus collection 加载失败，准备重建:", err);
+        if (!documents || documents.length === 0) {
+          throw err;
+        }
+        await deleteVectorStore(options).catch(() => {});
+        const rebuilt = await loadVectorStore(options);
+        console.log(`🔄 Milvus collection "${collectionName}" 正在重建...`);
+        await monitor("ensureCollection", () => ensureCollection(rebuilt, documents));
+        await monitor(`vectorStore.addDocuments n=${documents.length}`, () => rebuilt.addDocuments(documents));
+        console.log("✅ Collection 重建并插入成功");
+        return rebuilt;
+      }
     }
 
     // 不存在时需要 documents 来构建 collection

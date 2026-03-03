@@ -11,11 +11,23 @@ import { Annotation, END, REMOVE_ALL_MESSAGES, START, StateGraph, messagesStateR
 import { createStuffDocumentsChain } from "@langchain/classic/chains/combine_documents";
 import { createRetrievalChain } from "@langchain/classic/chains/retrieval";
 import { ChatOllama } from "@langchain/ollama";
+import { ChatOpenAI } from "@langchain/openai";
 import { summarizationMiddleware } from "langchain";
 import { config } from "./config.js";
 
 export function createChatModel(options = {}) {
-  // 创建聊天模型，优先使用调用方传入的配置，否则回退到全局配置
+  const modelUrl = options.modelUrl ?? config.ollama.modelUrl;
+  if (modelUrl) {
+    return new ChatOpenAI({
+      apiKey: options.apiKey ?? config.ollama.apiKey,
+      model: options.modelName ?? config.ollama.modelName ?? config.ollama.chatModel,
+      temperature: options.temperature ?? config.ollama.temperature,
+      streaming: options.streaming ?? false,
+      configuration: {
+        baseURL: modelUrl,
+      },
+    });
+  }
   return new ChatOllama({
     baseUrl: options.ollamaBaseUrl ?? config.ollama.baseUrl,
     model: options.chatModel ?? config.ollama.chatModel,
@@ -80,6 +92,7 @@ async function loadMessagesFromRedis(threadId) {
 
 function mapMessagesForStorage(messages) {
   // 清理 <think> 与 think 字段，避免写入 Redis
+  // 目的：只持久化对用户可见的内容，避免思考链泄露
   const stripThinkFromContent = (content) => {
     if (typeof content !== "string") return content;
     return content.replace(/<think>[\s\S]*?<\/think>\s*/gi, "");
@@ -136,14 +149,17 @@ async function saveMessagesToRedis(threadId, messages) {
 //
 export function createRagChain(vectorStore, options = {}) {
   // 创建检索+生成链路
+  // 结构：Retriever -> Stuff Documents Chain -> LLM
   const llm = createChatModel(options);
 
+  // Prompt 结构：system 指令 + human 问题与上下文拼接
   const prompt = ChatPromptTemplate.fromMessages([
     [
       "system",
       [
         "你是一个基于给定上下文回答问题的助手。",
         "只能使用上下文中的信息回答；\"。",
+         "并且你要对你的回答做出一些扩展和比较详细的解释；\"。",
         "回答请使用中文。"
         ,
       ].join("\n"),
@@ -155,10 +171,12 @@ export function createRagChain(vectorStore, options = {}) {
     llm,
     prompt,
   }).then((combineDocsChain) => {
+    // Retriever 负责从向量库检索 topK 文档
     const retriever = vectorStore.asRetriever({
       k: options.topK ?? config.retrieval.topK,
     });
 
+    // RetrievalChain 将检索结果注入到 prompt，并调用 LLM 生成答案
     return createRetrievalChain({
       retriever,
       combineDocsChain,
@@ -168,11 +186,12 @@ export function createRagChain(vectorStore, options = {}) {
 
 export function createRagGraph(vectorStore, options = {}) {
   // 构建 LangGraph：hydrate -> ingest -> rag -> summarize -> persist
+  // 目标：统一管理消息状态、上下文与持久化
   return createRagChain(vectorStore, options).then((ragChain) => {
     // 摘要模型与主模型保持一致，确保输出风格一致
     const summaryModel = createChatModel(options);
 
-    //生成state（Graph的全局变量）
+    // 生成全局 State，用于在节点之间传递数据
     const GraphState = Annotation.Root({
       messages: Annotation({
         reducer: messagesStateReducer,
@@ -187,6 +206,7 @@ export function createRagGraph(vectorStore, options = {}) {
     const graph = new StateGraph(GraphState)
       .addNode("hydrate", async (state) => {
         // 从 Redis 恢复历史消息到内存状态
+        // 如果不存在历史记录则跳过
         try {
           const threadId = state.threadId ?? "default";
           const restored = await loadMessagesFromRedis(threadId);
@@ -209,6 +229,7 @@ export function createRagGraph(vectorStore, options = {}) {
       })
       .addNode("rag", async (state) => {
         // 执行 RAG 生成，并写入 AI 消息
+        // 产出：answer + context + 最新 AIMessage
         const res = await ragChain.invoke({ input: state.input });
         const answer = String(res?.answer ?? res?.output ?? "");
         const context = res?.context ?? [];
@@ -285,7 +306,7 @@ export function createRagGraph(vectorStore, options = {}) {
 }
 
 export function ask(ragApp, state, question) {
-  // 对外统一入口，返回更新后的状态与答案
+  // 对外统一入口：传入当前 state 与问题，返回更新后的 state 与答案
   return ragApp.invoke({ ...state, input: question }).then((nextState) => {
     return {
       state: nextState,

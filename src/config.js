@@ -82,6 +82,9 @@ export const config = {
     embeddingModel: getConfig("ollama.embeddingModel", "OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"),
     chatModel: getConfig("ollama.chatModel", "OLLAMA_CHAT_MODEL", "llama3.1"),
     temperature: getConfig("ollama.temperature", "OLLAMA_TEMPERATURE", 0.2),
+    apiKey: getConfig("ollama.apiKey", "DASHSCOPE_API_KEY", ""),
+    modelUrl: getConfig("ollama.modelUrl", "REMOTE_MODEL_URL", ""),
+    modelName: getConfig("ollama.modelName", "REMOTE_MODEL_NAME", ""),
   },
   documents: {
     docsDir: getConfig("documents.docsDir", "DOCS_DIR", ".docs"),

@@ -20,6 +20,7 @@ import { ask, createRagGraph } from "./qa.js";
 import { config } from "./config.js";
 
 function time(label, fn) {
+  // 统一计时包装器：记录开始、结束与错误耗时
   const start = performance.now();
   console.log(`⏱️ [timing] ${label} start`);
   return Promise.resolve()
@@ -37,6 +38,7 @@ function time(label, fn) {
 }
 
 async function checkOllamaReady() {
+  // 调用 /api/tags 检查 Ollama 是否可用
   const baseUrl = String(config.ollama.baseUrl || "").replace(/\/+$/, "");
   const url = `${baseUrl}/api/tags`;
   const controller = new AbortController();
@@ -53,8 +55,10 @@ async function checkOllamaReady() {
 }
 
 function ensureVectorStore() {
+  // 加载文档 -> 切分 -> 构建/加载向量库
   return time("loadDocuments", () => loadDocuments())
     .then((docs) => {
+      // 将 source 统一为相对路径，便于展示与持久化
       docs.forEach(doc => {
         doc.metadata.source = path.relative(process.cwd(), doc.metadata.source);
       });
@@ -78,6 +82,7 @@ function ensureVectorStore() {
 }
 
 function main() {
+  // 启动流程：检查 Ollama -> 构建向量库 -> 创建 RAG 图 -> 进入交互循环
   time("checkOllamaReady", () => checkOllamaReady())
     .then(() => time("ensureVectorStore", () => ensureVectorStore()))
     .then((vectorStore) =>
@@ -88,11 +93,13 @@ function main() {
       )
     )
     .then((ragApp) => {
+      // 创建交互式命令行输入
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      let isClosed = false;
+      let isClosed = false;   
       rl.on("close", () => {
         isClosed = true;
       });
+      // threadId 用于标识对话线程，默认从环境变量读取
       const threadId = String(process.env.THREAD_ID || "default");
       let state = { threadId, messages: [] };
 
@@ -106,11 +113,13 @@ function main() {
           if (!q) return loop();
 
           if (q.toLowerCase() === "exit") {
+            // 退出交互
             rl.close();
             return;
           }
 
           if (q.toLowerCase() === "show") {
+            // 查询并展示向量库中部分记录
             console.log("🔍 正在查询向量数据库内容...");
             showVectorStore()
               .then((data) => {
@@ -140,6 +149,7 @@ function main() {
           }
 
           if (q.toLowerCase() === "rebuild") {
+            // 删除并重建向量库
             console.log("正在删除 Milvus collection 并重建...");
             Promise.resolve(deleteVectorStore())
               .then(() => {
@@ -151,6 +161,7 @@ function main() {
               .then(() => {
             loadDocuments()
               .then((docs) => {
+                // 重建时同样统一 source 为相对路径
                 docs.forEach(doc => {
                   doc.metadata.source = path.relative(process.cwd(), doc.metadata.source);
                 });
@@ -167,6 +178,7 @@ function main() {
                 })
               )
               .then((newApp) => {
+                // 替换 invoke 以复用现有 ragApp 引用
                 ragApp.invoke = newApp.invoke.bind(newApp);
                 console.log("重建完成。");
                 loop();
@@ -181,6 +193,7 @@ function main() {
             return;
           }
 
+          // 普通问答流程：调用 RAG 并更新 state
           ask(ragApp, state, q)
             .then((res) => {
               state = res.state;
@@ -195,6 +208,7 @@ function main() {
         });
       };
 
+      // 启动主循环
       loop();
     })
     .catch((err) => {
@@ -203,4 +217,5 @@ function main() {
     });
 }
 
+// 入口调用
 void main();
