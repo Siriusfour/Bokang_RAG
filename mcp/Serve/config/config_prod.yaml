@@ -1,0 +1,51 @@
+Mode:
+  Develop : true
+  DoMain : "suis.com"
+
+HttpServer:
+  Port: ":3008"
+  TrustProxies: #设置gin可以信任的代理服务器(例如 nginx 前置代理服务器),详情参见文档：https://www.yuque.com/xiaofensinixidaouxiang/bkfhct/vmobe7
+    IsOpen: 0                       # 可选值（0 或者 1）,如果 go 服务是被 nginx 代理，建议该值设置为 1，将 nginx 代理及机器的ip添加到 ProxyServerList 列表
+    # nginx 代理服务器ip地址
+    ProxyServerList:
+      - "192.168.10.1"
+      - "192.168.10.2"
+
+
+Logs:
+  MQPath: "./logs/MQ.log"
+  DbPath: "./logs/DB.log"
+  BusinessPath: "./Storage/Logs/Business.log"
+  HttpPath : "./Storage/Logs/Http.log"
+  TextFormat: "json"                                  #记录日志的格式，参数选项：console、json ， console 表示一般的文本格式
+  TimePrecision: "millisecond"                         #记录日志时，相关的时间精度，该参数选项：second  、 millisecond ， 分别表示 秒 和 毫秒 ,默认为毫秒级别
+  MaxSize: 10                                           #每个日志的最大尺寸(以MB为单位）， 超过该值，系统将会自动进行切割
+  MaxBackups: 7                                        #保留旧日志最大个数
+  MaxAge: 15                                           #保留旧日志最大天数
+  Compress: false                                      #日志备份时，是否进行压缩
+
+
+Redis:
+  DNS: "localhost:6379"
+  DB: 0
+  Password: ""
+
+
+grpc:
+  DNS: "127.0.0.1:5001"        #192.168.3.205
+
+Token:
+  AkOutTime: 3h     #3小时
+  RkOutTime: 72h   #3天
+
+
+DB:
+  MySQL:
+    Host: "127.0.0.1"
+    DataBase: "Note_Writer"
+    Port: 3306
+    User: "root"
+    Password: "123456789"    #更好的方案：在环境变量中获取
+    Charset: "utf8"
+    MaxIdleConns: 10
+    MaxOpenConns: 128

@@ -14,6 +14,18 @@ import { ChatOllama } from "@langchain/ollama";
 import { ChatOpenAI } from "@langchain/openai";
 import { summarizationMiddleware } from "langchain";
 import { config } from "./config.js";
+import { safeParseJsonObject, normalizeToolList, isToolNameAllowed, normalizeArgs } from "./prase.js";
+import {
+  createHydrateNode,
+  createIngestNode,
+  createRagNode,
+  createMcpListNode,
+  createSummarizeNode,
+  createPersistNode,
+  createDecideNode,
+  createToolNode,
+  createDefaultMcpInvoke,
+} from "./node.js";
 
 export function createChatModel(options = {}) {
   const modelUrl = options.modelUrl ?? config.ollama.modelUrl;
@@ -176,7 +188,7 @@ export function createRagChain(vectorStore, options = {}) {
       k: options.topK ?? config.retrieval.topK,
     });
 
-    // RetrievalChain 将检索结果注入到 prompt，并调用 LLM 生成答案
+    // RetrievalChain 将检索结果和问题注入到 prompt，并调用 LLM 生成答案
     return createRetrievalChain({
       retriever,
       combineDocsChain,
@@ -201,106 +213,61 @@ export function createRagGraph(vectorStore, options = {}) {
       input: Annotation(),
       answer: Annotation(),
       context: Annotation(),
+
+      mcpTools: Annotation(),     // MCP 列表（数组/字符串）
+      toolPlan: Annotation(),     // { needTool, toolName, args, reason }
+      toolResult: Annotation(),   // 工具返回
+      toolUsed: Annotation(),     // 是否使用了工具
+      toolUsedReason: Annotation(), // 工具使用原因
+      toolUsedArgs: Annotation(),   // 工具使用参数
+      toolUsedResultSummary: Annotation(), // 工具使用结果摘要
+      toolUsedResult: Annotation(),       // 工具使用原始结果
+      toolCallsCount: Annotation({
+        reducer: (a, b) => a + (b?.needTool === true ? 1 : 0),
+        default: () => 0,
+      }),
+      toolCallsMax: Annotation({
+        reducer: (a, b) => Math.max(a, b?.needTool === true ? 1 : 0),
+        default: () => 0,
+      }),
+
     });
 
+    //初始化图流程编排器
     const graph = new StateGraph(GraphState)
-      .addNode("hydrate", async (state) => {
-        // 从 Redis 恢复历史消息到内存状态
-        // 如果不存在历史记录则跳过
-        try {
-          const threadId = state.threadId ?? "default";
-          const restored = await loadMessagesFromRedis(threadId);
-          if (!Array.isArray(restored) || restored.length === 0) {
-            return {};
-          }
-          return {
-            messages: [new RemoveMessage({ id: REMOVE_ALL_MESSAGES }), ...restored],
-          };
-        } catch (e) {
-          console.warn("⚠️ Redis hydrate failed:", e?.message ?? e);
-          return {};
-        }
-      })
-      .addNode("ingest", (state) => {
-        // 将当前用户输入追加到消息队列
-        return {
-          messages: [new HumanMessage(state.input)],
-        };
-      })
-      .addNode("rag", async (state) => {
-        // 执行 RAG 生成，并写入 AI 消息
-        // 产出：answer + context + 最新 AIMessage
-        const res = await ragChain.invoke({ input: state.input });
-        const answer = String(res?.answer ?? res?.output ?? "");
-        const context = res?.context ?? [];
-        return {
-          answer,
-          context,
-          messages: [new AIMessage(answer)],
-        };
-      })
-      .addNode("summarize", async (state) => {
-        // 当 Redis value 超过阈值时，将历史消息压缩为摘要
-        try {
-          const messages = Array.isArray(state.messages) ? state.messages : [];
-          const maxValueBytes = Number(config.redis?.maxValueBytes ?? 0);
-          if (!Number.isFinite(maxValueBytes) || maxValueBytes <= 0) return {};
-          const estimatedSize = estimateRedisValueBytes(messages);
-          if (estimatedSize <= maxValueBytes) return {};
+      .addNode("hydrate", createHydrateNode({ loadMessagesFromRedis, RemoveMessage, REMOVE_ALL_MESSAGES }))
+      .addNode("ingest", createIngestNode({ HumanMessage }))
+      .addNode("rag", createRagNode({ ragChain, AIMessage }))
+      .addNode("mcp_list", createMcpListNode())
+      .addNode("summarize",createSummarizeNode({SystemMessage,RemoveMessage,REMOVE_ALL_MESSAGES,summarizationMiddleware,summaryModel,estimateRedisValueBytes,config,}))
+      .addNode("persist", createPersistNode({ saveMessagesToRedis }))
+      .addNode("tool",createToolNode({normalizeToolList,createDefaultMcpInvoke,options,}))
+      .addNode("decide",createDecideNode({createChatModel,normalizeToolList,safeParseJsonObject,normalizeArgs,isToolNameAllowed,SystemMessage,HumanMessage,options,}))
 
-          // system 消息永久保留
-          const systemMessages = messages.filter((m) => SystemMessage.isInstance(m));
-          const nonSystemMessages = messages.filter(
-            (m) => !SystemMessage.isInstance(m) && !RemoveMessage.isInstance(m)
-          );
-          if (nonSystemMessages.length === 0) return {};
+.addEdge(START, "hydrate")
+.addEdge("hydrate", "ingest")
+// 准备 MCP 工具列表 + 决策
+.addEdge("ingest", "mcp_list")
+.addEdge("mcp_list", "decide")
 
-          // 只对非 system 消息做摘要，并保留最近 N 条原文
-          const keepLastN = Math.max(0, Number(config.redis?.summaryKeepLastN ?? 6));
-          const middleware = summarizationMiddleware({
-            model: summaryModel,
-            trigger: { messages: 1 },
-            keep: { messages: keepLastN },
-            summaryPrefix: config.redis?.summaryPrefix ?? "对话摘要：",
-          });
-          const res = await middleware.beforeModel(
-            { messages: nonSystemMessages },
-            { context: {} }
-          );
-          if (!res?.messages) return {};
-          const summarizedMessages = res.messages.filter(
-            (m) => !RemoveMessage.isInstance(m)
-          );
-          if (summarizedMessages.length === 0) return {};
-          return {
-            messages: [
-              new RemoveMessage({ id: REMOVE_ALL_MESSAGES }),
-              ...systemMessages,
-              ...summarizedMessages,
-            ],
-          };
-        } catch (e) {
-          console.warn("⚠️ Summarize failed:", e?.message ?? e);
-          return {};
-        }
-      })
-      .addNode("persist", async (state) => {
-        // 将最终消息写回 Redis
-        try {
-          const threadId = state.threadId ?? "default";
-          await saveMessagesToRedis(threadId, state.messages ?? []);
-        } catch (e) {
-          console.warn("⚠️ Redis persist failed:", e?.message ?? e);
-        }
-        return {};
-      })
-      .addEdge(START, "hydrate")
-      .addEdge("hydrate", "ingest")
-      .addEdge("ingest", "rag")
-      .addEdge("rag", "summarize")
-      .addEdge("summarize", "persist")
-      .addEdge("persist", END);
+//条件分支（需要工具才走 tool）
+.addConditionalEdges("decide", (state) => {
+  // 硬限制：超过上限直接不走工具
+  const used = Number(state.toolCallsCount ?? 0);
+  const max = Number(state.toolCallsMax ?? 1);
+  if (used >= max) return "rag";
 
+  return state.toolPlan?.needTool === true ? "tool" : "rag";
+})
+
+// 工具执行完成后，再走 rag（或直接 generate，看你设计）
+.addEdge("tool", "rag")
+
+// 后面不变
+.addEdge("rag", "summarize")
+.addEdge("summarize", "persist")
+.addEdge("persist", END)
+      
     return graph.compile();
   });
 }
