@@ -1,3 +1,5 @@
+import { callMcpTool } from "./mcpClient.js";
+
 export function createHydrateNode({ loadMessagesFromRedis, RemoveMessage, REMOVE_ALL_MESSAGES }) {
   return async (state) => {
     try {
@@ -252,36 +254,33 @@ export function createDecideNode({
   };
 }
 
+// invoke工厂函数 ， 返回一个异步函数，用于调用 MCP 工具
 export function createDefaultMcpInvoke(options) {
-  const baseUrl = String(options?.mcpBaseUrl || "http://127.0.0.1:8080").replace(/\/+$/, "");
-  const endpoint = `${baseUrl}/mcp/invoke`;
-  return async ({ name, args }) => {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, args }),
+  //读取配置， options -> 环境变量 -> 默认值  依次读取
+  const baseUrl = options?.mcpBaseUrl || process.env.MCP_BASE_URL || "http://127.0.0.1:5700";
+  const authToken = options?.mcpAuthToken || process.env.MCP_AUTH_TOKEN || "";
+  const headers = options?.mcpHeaders || null;
+  return async ({ name, args, state }) => {
+    const sessionId =
+      options?.mcpSessionId || state?.threadId || state?.sessionId || "default";
+    return callMcpTool({
+      baseUrl,
+      authToken,
+      sessionId,
+      headers,
+      name,
+      args,
     });
-    if (!res.ok) {
-      const text = await readStreamText(res.body);
-      throw new Error(`MCP invoke failed (${res.status}): ${text}`);
-    }
-    const text = await readStreamText(res.body);
-    const trimmed = text.trim();
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-      try {
-        return JSON.parse(trimmed);
-      } catch {
-        return text;
-      }
-    }
-    return text;
   };
 }
 
 export function createToolNode({ normalizeToolList, createDefaultMcpInvoke, options }) {
   return async (state) => {
+    //清洗工具列表
     const tools = normalizeToolList(state.mcpTools);
     const plan = state.toolPlan;
+
+    //如果不需要调用工具，直接返回
     if (!plan?.needTool) {
       return {
         toolResult: null,
@@ -289,6 +288,8 @@ export function createToolNode({ normalizeToolList, createDefaultMcpInvoke, opti
         toolUsedResultSummary: null,
       };
     }
+
+    //从工具列表中筛选出需要的工具名称
     const tool = tools.find((t) => t.name === plan.toolName);
     if (!tool) {
       return {
@@ -297,6 +298,7 @@ export function createToolNode({ normalizeToolList, createDefaultMcpInvoke, opti
         toolUsedResultSummary: "工具不存在，已跳过调用。",
       };
     }
+    //如果配置了自定义的 MCP 执行器，使用它；否则使用默认执行器
     const invoke = typeof options.mcpInvoke === "function" ? options.mcpInvoke : createDefaultMcpInvoke(options);
     if (typeof invoke !== "function") {
       return {
@@ -306,12 +308,14 @@ export function createToolNode({ normalizeToolList, createDefaultMcpInvoke, opti
       };
     }
     try {
+      //运行返回的invoke函数，调用 MCP 工具
       const result = await invoke({
         name: tool.name,
         args: plan.args,
         tool,
         state,
       });
+      //成功后生成摘要， 如果是字符串直接使用，否则 JSON.stringify 转换
       const summary = typeof result === "string" ? result : JSON.stringify(result);
       return {
         toolResult: result,
@@ -328,16 +332,3 @@ export function createToolNode({ normalizeToolList, createDefaultMcpInvoke, opti
   };
 }
 
-async function readStreamText(body) {
-  if (!body) return "";
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let result = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    result += decoder.decode(value, { stream: true });
-  }
-  result += decoder.decode();
-  return result;
-}

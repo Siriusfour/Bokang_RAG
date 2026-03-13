@@ -1,20 +1,17 @@
 {
   "ollama": {
     "baseUrl": "http://127.0.0.1:11434",
-    "embeddingModel": "bge-m3",  
-    "chatModel": "deepseek-r1:14b",               
-    "temperature": 0.2,
-    "apiKey": "sk-803aead73a1e4f61889fdc502d4f332c",
-    "modelUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "modelName": "qwen-plus"
+    "embeddingModel": "nomic-embed-text",  
+    "chatModel": "qwen3-vl:0.6b",               
+    "temperature": 0.2
   },
   "documents": {
     "docsDir": ".docs",
     "chunkSize": 1000,
-    "chunkOverlap": 20
+    "chunkOverlap": 200
   },
   "retrieval": {
-    "topK": 4
+    "topK": 5
   },
   "vectorStore": {
     "type": "milvus",

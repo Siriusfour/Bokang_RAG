@@ -26,6 +26,7 @@ export function safeParseJsonObject(text) {
   }
 }
 
+//Tool列表清洗
 export function normalizeToolList(mcpTools) {
   if (!Array.isArray(mcpTools)) return [];
   return mcpTools.filter((t) => t && typeof t.name === "string");

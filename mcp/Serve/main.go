@@ -55,8 +55,8 @@ func main() {
 	router := gin.Default()
 	router.Any("/mcp", gin.WrapH(mcpHandler))
 
-	log.Println("MCP server 启动于 :8080")
-	if err := router.Run(":8080"); err != nil {
+	log.Println("MCP server 启动于 :5700")
+	if err := router.Run(":5700"); err != nil {
 		log.Fatal(err)
 	}
 }
