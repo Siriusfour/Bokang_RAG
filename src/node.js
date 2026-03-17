@@ -31,7 +31,9 @@ export function createRagNode({ ragChain, AIMessage }) {
     const toolHint = state.toolUsedResultSummary
       ? `\n\n工具结果：\n${String(state.toolUsedResultSummary)}`
       : "";
+    console.log("⏳ 等待 LLM 生成回答...");
     const res = await ragChain.invoke({ input: `${String(state.input ?? "")}${toolHint}` });
+    console.log("✅ LLM 已返回回答");
     const answer = String(res?.answer ?? res?.output ?? "");
     const context = res?.context ?? [];
     return {

@@ -260,7 +260,7 @@ export function createRagGraph(vectorStore, options = {}) {
   return state.toolPlan?.needTool === true ? "tool" : "rag";
 })
 
-// 工具执行完成后，再走 rag（或直接 generate，看你设计）
+// 工具执行完成后，再走 rag（或直接 generate，看业务需求）
 .addEdge("tool", "rag")
 
 // 后面不变

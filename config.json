@@ -2,7 +2,7 @@
   "ollama": {
     "baseUrl": "http://127.0.0.1:11434",
     "embeddingModel": "nomic-embed-text",  
-    "chatModel": "qwen3-vl:0.6b",               
+    "chatModel": "qwen3:0.6b",               
     "temperature": 0.2
   },
   "documents": {
@@ -11,7 +11,7 @@
     "chunkOverlap": 200
   },
   "retrieval": {
-    "topK": 5
+    "topK": 4
   },
   "vectorStore": {
     "type": "milvus",

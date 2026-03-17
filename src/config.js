@@ -94,6 +94,9 @@ export const config = {
   retrieval: {
     topK: getConfig("retrieval.topK", "TOP_K", 4),
   },
+  rpc: {
+    port: getConfig("rpc.port", "RPC_PORT", 7071),
+  },
   vectorStore: {
     /**
      * 支持：milvus / hnswlib（目前项目默认切换到 milvus）
