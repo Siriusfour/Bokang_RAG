@@ -79,6 +79,11 @@ function createAskHandler(ragApp) {
   return async (call, callback) => {
     const question = call?.request?.question;
     const sessionId = call?.request?.sessionId;
+    const userId = call?.request?.userId;
+    console.log(`userId: ${userId}`);
+    console.log(`sessionId: ${sessionId}`);
+    console.log(`question: ${question}`);
+
     if (!question || typeof question !== "string") {
       callback({
         code: grpc.status.INVALID_ARGUMENT,
@@ -89,7 +94,8 @@ function createAskHandler(ragApp) {
     try {
       const threadId =
         typeof sessionId === "string" && sessionId.trim() ? sessionId : "default";
-      const state = { threadId, messages: [] };
+      const userIdValue = typeof userId === "string" && userId.trim() ? userId : "default";
+      const state = { UserID: userIdValue, ContextID: threadId, messages: []};
       const result = await ask(ragApp, state, question);
       callback(null, { answer: result.answer ?? "" });
     } catch (err) {

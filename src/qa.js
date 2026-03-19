@@ -21,7 +21,6 @@ import {
   createRagNode,
   createMcpListNode,
   createSummarizeNode,
-  createPersistNode,
   createDecideNode,
   createToolNode,
   createDefaultMcpInvoke,
@@ -83,22 +82,36 @@ function getRedisClient() {
   return redisClientPromise;
 }
 
-function redisKeyForThread(threadId) {
+function redisKeyForThread(UserID,ContextID) {
   // 按 threadId 生成 Redis key，支持自定义前缀
-  const prefix = config.redis?.keyPrefix ?? "rag:mem:";
-  const id = String(threadId || "default");
-  return `${prefix}${id}`;
+  const prefix = config.redis?.keyPrefix;
+  return `${prefix}${UserID}:${ContextID}`;
 }
 
-async function loadMessagesFromRedis(threadId) {
-  // 从 Redis 读取并反序列化消息
+//读取redis的key ， 传入langchain作为记忆
+async function loadMessagesFromRedis(UserID,ContextID) {
   const client = await getRedisClient();
-  const key = redisKeyForThread(threadId);
-  const raw = await client.get(key);
-  if (!raw) return [];
+  const key = redisKeyForThread(UserID,ContextID);
 
-  const parsed = JSON.parse(raw);
-  const stored = Array.isArray(parsed?.messages) ? parsed.messages : [];
+  console.log(key);
+
+  const redisUrl = String(config.redis?.url ?? "");
+  console.log(`[redis] url=${redisUrl}`);
+  const allKeys = await client.keys("*");
+  console.log("[redis] keys=", allKeys);
+
+  
+  const rawList = await client.lRange(key, 0, -1);
+  if (!Array.isArray(rawList) || rawList.length === 0) return [];
+  const stored = rawList
+    .map((item) => {
+      try {
+        return JSON.parse(item);
+      } catch {
+        return null;
+      }
+    })
+    .filter((item) => item && typeof item === "object");
   return mapStoredMessagesToChatMessages(stored);
 }
 
@@ -145,18 +158,18 @@ function estimateRedisValueBytes(messages) {
   return Buffer.byteLength(JSON.stringify(payload));
 }
 
-async function saveMessagesToRedis(threadId, messages) {
-  // 将消息持久化到 Redis，可选 TTL
-  const client = await getRedisClient();
-  const key = redisKeyForThread(threadId);
-  const payload = buildRedisPayload(messages);
-  const ttlSeconds = Number(config.redis?.ttlSeconds ?? 0);
-  if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
-    await client.set(key, JSON.stringify(payload), { EX: ttlSeconds });
-  } else {
-    await client.set(key, JSON.stringify(payload));
-  }
-}
+// async function saveMessagesToRedis(threadId, messages) {
+//   // 将消息持久化到 Redis，可选 TTL
+//   const client = await getRedisClient();
+//   const key = redisKeyForThread(threadId);
+//   const payload = buildRedisPayload(messages);
+//   const ttlSeconds = Number(config.redis?.ttlSeconds ?? 0);
+//   if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
+//     await client.set(key, JSON.stringify(payload), { EX: ttlSeconds });
+//   } else {
+//     await client.set(key, JSON.stringify(payload));
+//   }
+// }
 
 //
 export function createRagChain(vectorStore, options = {}) {
@@ -209,7 +222,8 @@ export function createRagGraph(vectorStore, options = {}) {
         reducer: messagesStateReducer,
         default: () => [],
       }),
-      threadId: Annotation(),
+      UserID: Annotation(),
+      ContextID: Annotation(),
       input: Annotation(),
       answer: Annotation(),
       context: Annotation(),
@@ -230,7 +244,6 @@ export function createRagGraph(vectorStore, options = {}) {
         reducer: (a, b) => Math.max(a, b?.needTool === true ? 1 : 0),
         default: () => 0,
       }),
-
     });
 
     //初始化图流程编排器
@@ -240,7 +253,6 @@ export function createRagGraph(vectorStore, options = {}) {
       .addNode("rag", createRagNode({ ragChain, AIMessage }))
       .addNode("mcp_list", createMcpListNode())
       .addNode("summarize",createSummarizeNode({SystemMessage,RemoveMessage,REMOVE_ALL_MESSAGES,summarizationMiddleware,summaryModel,estimateRedisValueBytes,config,}))
-      .addNode("persist", createPersistNode({ saveMessagesToRedis }))
       .addNode("tool",createToolNode({normalizeToolList,createDefaultMcpInvoke,options,}))
       .addNode("decide",createDecideNode({createChatModel,normalizeToolList,safeParseJsonObject,normalizeArgs,isToolNameAllowed,SystemMessage,HumanMessage,options,}))
 
@@ -265,8 +277,7 @@ export function createRagGraph(vectorStore, options = {}) {
 
 // 后面不变
 .addEdge("rag", "summarize")
-.addEdge("summarize", "persist")
-.addEdge("persist", END)
+.addEdge("summarize", END)
       
     return graph.compile();
   });

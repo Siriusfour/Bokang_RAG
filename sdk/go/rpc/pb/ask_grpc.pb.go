@@ -19,8 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AskService_Ask_FullMethodName       = "/rag.ask.v1.AskService/Ask"
-	AskService_AskStream_FullMethodName = "/rag.ask.v1.AskService/AskStream"
+	AskService_Ask_FullMethodName = "/rag.ask.v1.AskService/Ask"
 )
 
 // AskServiceClient is the client API for AskService service.
@@ -28,7 +27,6 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type AskServiceClient interface {
 	Ask(ctx context.Context, in *AskRequest, opts ...grpc.CallOption) (*AskResponse, error)
-	AskStream(ctx context.Context, in *AskRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AskResponse], error)
 }
 
 type askServiceClient struct {
@@ -49,31 +47,11 @@ func (c *askServiceClient) Ask(ctx context.Context, in *AskRequest, opts ...grpc
 	return out, nil
 }
 
-func (c *askServiceClient) AskStream(ctx context.Context, in *AskRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AskResponse], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &AskService_ServiceDesc.Streams[0], AskService_AskStream_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[AskRequest, AskResponse]{ClientStream: stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type AskService_AskStreamClient = grpc.ServerStreamingClient[AskResponse]
-
 // AskServiceServer is the server API for AskService service.
 // All implementations must embed UnimplementedAskServiceServer
 // for forward compatibility.
 type AskServiceServer interface {
 	Ask(context.Context, *AskRequest) (*AskResponse, error)
-	AskStream(*AskRequest, grpc.ServerStreamingServer[AskResponse]) error
 	mustEmbedUnimplementedAskServiceServer()
 }
 
@@ -86,9 +64,6 @@ type UnimplementedAskServiceServer struct{}
 
 func (UnimplementedAskServiceServer) Ask(context.Context, *AskRequest) (*AskResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Ask not implemented")
-}
-func (UnimplementedAskServiceServer) AskStream(*AskRequest, grpc.ServerStreamingServer[AskResponse]) error {
-	return status.Errorf(codes.Unimplemented, "method AskStream not implemented")
 }
 func (UnimplementedAskServiceServer) mustEmbedUnimplementedAskServiceServer() {}
 func (UnimplementedAskServiceServer) testEmbeddedByValue()                    {}
@@ -129,17 +104,6 @@ func _AskService_Ask_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
-func _AskService_AskStream_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(AskRequest)
-	if err := stream.RecvMsg(m); err != nil {
-		return err
-	}
-	return srv.(AskServiceServer).AskStream(m, &grpc.GenericServerStream[AskRequest, AskResponse]{ServerStream: stream})
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type AskService_AskStreamServer = grpc.ServerStreamingServer[AskResponse]
-
 // AskService_ServiceDesc is the grpc.ServiceDesc for AskService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -152,12 +116,6 @@ var AskService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _AskService_Ask_Handler,
 		},
 	},
-	Streams: []grpc.StreamDesc{
-		{
-			StreamName:    "AskStream",
-			Handler:       _AskService_AskStream_Handler,
-			ServerStreams: true,
-		},
-	},
+	Streams:  []grpc.StreamDesc{},
 	Metadata: "ask.proto",
 }

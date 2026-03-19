@@ -10,6 +10,7 @@ service AskService {
 message AskRequest {
   string question = 1;
   string sessionId = 2;
+  string userId = 3;
 }
 
 message AskResponse {

@@ -99,9 +99,9 @@ function main() {
       rl.on("close", () => {
         isClosed = true;
       });
-      // threadId 用于标识对话线程，默认从环境变量读取
-      const threadId = String(process.env.THREAD_ID || "default");
-      let state = { threadId, messages: [] };
+      const userId = String(process.env.USER_ID || "default");
+      const contextId = String(process.env.CONTEXT_ID || "default");
+      let state = { UserID: userId, ContextID: contextId, messages: [] };
 
       console.log("本地知识库 RAG CLI 已启动。输入问题；exit 退出；rebuild 重建索引。");
 

@@ -3,14 +3,26 @@ import { callMcpTool } from "./mcpClient.js";
 export function createHydrateNode({ loadMessagesFromRedis, RemoveMessage, REMOVE_ALL_MESSAGES }) {
   return async (state) => {
     try {
-      const threadId = state.threadId ?? "default";
-      const restored = await loadMessagesFromRedis(threadId);
+      const UserID = state?.UserID ?? "default";
+      const ContextID = state?.ContextID ?? "default";
+
+ 
+
+      const restored = await loadMessagesFromRedis(UserID, ContextID);
+
+               console.log("hydrate state:", state);
+               console.log("hydrate restored:", restored);
+
       if (!Array.isArray(restored) || restored.length === 0) {
         return {};
       }
+
+
       return {
         messages: [new RemoveMessage({ id: REMOVE_ALL_MESSAGES }), ...restored],
       };
+
+  
     } catch (e) {
       console.warn("⚠️ Redis hydrate failed:", e?.message ?? e);
       return {};
@@ -333,4 +345,3 @@ export function createToolNode({ normalizeToolList, createDefaultMcpInvoke, opti
     }
   };
 }
-
