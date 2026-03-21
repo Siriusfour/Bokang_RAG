@@ -10,8 +10,8 @@ export function createHydrateNode({ loadMessagesFromRedis, RemoveMessage, REMOVE
 
       const restored = await loadMessagesFromRedis(UserID, ContextID);
 
-               console.log("hydrate state:", state);
-               console.log("hydrate restored:", restored);
+      console.log("hydrate state:", state);
+      console.log("hydrate restored:", restored);
 
       if (!Array.isArray(restored) || restored.length === 0) {
         return {};
@@ -32,25 +32,133 @@ export function createHydrateNode({ loadMessagesFromRedis, RemoveMessage, REMOVE
 
 export function createIngestNode({ HumanMessage }) {
   return (state) => {
+    // ingest 节点的输入优先级：
+    // 1) routerQuestion：由上游 route_input 节点产出的“路由后问题”
+    // 2) input：原始用户问题
+    // 3) 空字符串兜底，避免出现 undefined/null 传入 HumanMessage
+    //
+    // 这样可以保证“问题先经过 RouterModel 再进入主链路”：
+    // - 如果 Router 成功改写问题，这里就会消费改写结果；
+    // - 如果 Router 失败或未产出有效内容，这里会自动回退到原问题。
+    const nextInput = String(state?.routerQuestion ?? state?.input ?? "");
     return {
-      messages: [new HumanMessage(state.input)],
+      // 将最终采用的问题写回 state.input，确保后续节点（decide/rag）读取到一致输入
+      input: nextInput,
+      // 以最终问题构造 HumanMessage，进入消息状态流
+      messages: [new HumanMessage(nextInput)],
     };
   };
 }
 
-export function createRagNode({ ragChain, AIMessage }) {
+export function createRouteInputNode({
+  createRouterModel,
+  safeParseJsonObject,
+  SystemMessage,
+  HumanMessage,
+  options,
+}) {
   return async (state) => {
+    const input = String(state?.input ?? "");
+    const routerModel = options?.routerModel;
+    if (!routerModel || !String(routerModel).trim()) {
+      return {
+        routerDecision: "router_model_not_configured",
+        routerQuestion: input,
+      };
+    }
+    try {
+      const llm = createRouterModel(options);
+      const system = [
+        "你是问题改写器。",
+        "我将给你一个问题和一个历史问题的列表，你来确认这个问题是否具有相似的表达和意图问题存在于这个列表",
+        "如果有，则把问题改写成这个相似问题",
+        "如果没有，则保持原问题不变",
+        "下面是一个些例子：",
+        "原始问题：我们公司一个月最多请假多少天？",
+        "历史问题列表：['对细菌内毒素检查有影响的因素有哪些？', '一个月最多请多少天假，超过了会怎样？', '我们这边请假和谁请']",
+        "推理过程：原始问题与历史问题列表中的第二个问题有相似的表达和意图，都是在询问公司请假的最大天数，第三个问题是一个陷阱，我们需要比较的是一个月最多请假多少天，而不是和谁请假，虽然问题都是与请假有关，但这是两个不同的主题。",
+        "改写后的问题：一个月最多请多少天假，超过了会怎样？",
+        "只需要输出改写后的问题，绝对禁止输出其他内容",
+      ].join("\n");
+      const human = input;
+      const res = await llm.invoke([
+        new SystemMessage(system),
+        new HumanMessage(human),
+      ]);
+      const parsed = safeParseJsonObject(String(res?.content ?? ""));
+      const routedQuestion =
+        typeof parsed?.question === "string" && parsed.question.trim()
+          ? parsed.question.trim()
+          : input;
+      const reason =
+        typeof parsed?.reason === "string" && parsed.reason.trim()
+          ? parsed.reason.trim()
+          : "router_ok";
+      return {
+        input: routedQuestion,
+        routerQuestion: routedQuestion,
+        routerDecision: reason,
+      };
+    } catch (e) {
+      return {
+        routerDecision: `router_failed:${e?.message ?? String(e)}`,
+        routerQuestion: input,
+      };
+    }
+  };
+}
+
+export function createRagNode({ ragChain, AIMessage, computeQuestionMd5Upper, saveQuestionChunkIndex }) {
+  return async (state) => {
+    // 如果上一步执行了工具调用，把工具结果拼到本轮问题后面，作为补充上下文输入给 RAG。
+    // 目的：让模型在生成最终回答时可以参考工具返回的实时信息。
     const toolHint = state.toolUsedResultSummary
       ? `\n\n工具结果：\n${String(state.toolUsedResultSummary)}`
       : "";
+    // 调用检索增强链：内部会先检索文档，再把“问题+上下文”交给主模型生成答案。
     console.log("⏳ 等待 LLM 生成回答...");
-    const res = await ragChain.invoke({ input: `${String(state.input ?? "")}${toolHint}` });
+
+const question =
+  typeof state.routerQuestion === "string" && state.routerQuestion.trim()
+    ? state.routerQuestion
+    : state.input;
+
+    const queryText = String(question ?? "");
+    const questionMd5 =
+      typeof computeQuestionMd5Upper === "function"
+        ? computeQuestionMd5Upper(queryText)
+        : "";
+
+    const res = await ragChain.invoke({ input: `${question}${toolHint}` });
     console.log("✅ LLM 已返回回答");
+    // 兼容不同链返回字段（answer/output），统一转为字符串，避免下游收到非字符串类型。
     const answer = String(res?.answer ?? res?.output ?? "");
+    // 检索到的上下文文档列表，写回 state.context 供返回层或调试使用。
     const context = res?.context ?? [];
+    try {
+      if (questionMd5 && typeof saveQuestionChunkIndex === "function") {
+        const chunkIds = (Array.isArray(context) ? context : [])
+          .map((doc) => doc?.metadata?.langchain_primaryid ?? doc?.metadata?.pk)
+          .filter((id) => id !== null && id !== undefined && String(id).trim() !== "");
+        const firstScore = (Array.isArray(context) && context.length > 0)
+          ? (context[0]?.score ?? context[0]?.metadata?.score)
+          : undefined;
+        const score = Number(firstScore);
+        await saveQuestionChunkIndex({
+          questionMd5,
+          chunkIds,
+          score: Number.isFinite(score) ? score : undefined,
+        });
+      }
+    } catch (e) {
+      console.warn("⚠️ Redis chunk index persist failed:", e?.message ?? e);
+    }
     return {
+      // 最终回答文本，供 rpc/cli 直接返回给调用方。
       answer,
+      // 本轮命中的检索上下文。
       context,
+      // 追加一条 AIMessage 到消息状态，用于后续记忆持久化与多轮对话。
       messages: [new AIMessage(answer)],
     };
   };

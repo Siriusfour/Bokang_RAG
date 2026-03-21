@@ -7,6 +7,7 @@ import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { AIMessage, HumanMessage, RemoveMessage, SystemMessage } from "@langchain/core/messages";
 import { mapChatMessagesToStoredMessages, mapStoredMessagesToChatMessages } from "@langchain/core/messages";
 import { createClient } from "redis";
+import { createHash } from "node:crypto";
 import { Annotation, END, REMOVE_ALL_MESSAGES, START, StateGraph, messagesStateReducer } from "@langchain/langgraph";
 import { createStuffDocumentsChain } from "@langchain/classic/chains/combine_documents";
 import { createRetrievalChain } from "@langchain/classic/chains/retrieval";
@@ -18,6 +19,7 @@ import { safeParseJsonObject, normalizeToolList, isToolNameAllowed, normalizeArg
 import {
   createHydrateNode,
   createIngestNode,
+  createRouteInputNode,
   createRagNode,
   createMcpListNode,
   createSummarizeNode,
@@ -43,6 +45,37 @@ export function createChatModel(options = {}) {
     baseUrl: options.ollamaBaseUrl ?? config.ollama.baseUrl,
     model: options.chatModel ?? config.ollama.chatModel,
     temperature: options.temperature ?? config.ollama.temperature,
+    streaming: options.streaming ?? false,
+  });
+}
+
+export function createRouterModel(options = {}) {
+  const modelUrl = options.modelUrl ?? config.ollama.modelUrl;
+  if (modelUrl) {
+    return new ChatOpenAI({
+      apiKey: options.apiKey ?? config.ollama.apiKey,
+      model:
+        options.routerModelName ??
+        options.routerModel ??
+        config.ollama.routerModel ??
+        options.modelName ??
+        config.ollama.modelName ??
+        config.ollama.chatModel,
+      temperature: options.routerTemperature ?? options.temperature ?? config.ollama.temperature,
+      streaming: options.streaming ?? false,
+      configuration: {
+        baseURL: modelUrl,
+      },
+    });
+  }
+  return new ChatOllama({
+    baseUrl: options.ollamaBaseUrl ?? config.ollama.baseUrl,
+    model:
+      options.routerModel ??
+      config.ollama.routerModel ??
+      options.chatModel ??
+      config.ollama.chatModel,
+    temperature: options.routerTemperature ?? options.temperature ?? config.ollama.temperature,
     streaming: options.streaming ?? false,
   });
 }
@@ -88,20 +121,47 @@ function redisKeyForThread(UserID,ContextID) {
   return `${prefix}${UserID}:${ContextID}`;
 }
 
+function computeQuestionMd5Upper(question) {
+  return createHash("md5")
+    .update(String(question ?? ""), "utf8")
+    .digest("hex")
+    .toUpperCase();
+}
+
+function redisKeyForQuestionChunkIndex(questionMd5) {
+  const prefix = config.redis?.chunkIndexPrefix ?? "RAG_QueryChunkMap:";
+  return `${prefix}${String(questionMd5 ?? "")}`;
+}
+
+async function saveQuestionChunkIndex({ questionMd5, chunkIds, score }) {
+  if (!questionMd5) return;
+  const client = await getRedisClient();
+  const key = redisKeyForQuestionChunkIndex(questionMd5);
+  const orderedChunkIds = Array.isArray(chunkIds) ? chunkIds : [];
+  const payload = {
+    chunk_ids: orderedChunkIds,
+    version: String(config.redis?.chunkIndexVersion ?? "v1"),
+    ts: Date.now(),
+  };
+  if (Number.isFinite(score)) {
+    payload.score = score;
+  }
+  const ttlSeconds = Number(config.redis?.chunkIndexTtlSeconds ?? config.redis?.ttlSeconds ?? 0);
+  if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
+    await client.set(key, JSON.stringify(payload), { EX: ttlSeconds });
+    return;
+  }
+  await client.set(key, JSON.stringify(payload));
+}
+
 //读取redis的key ， 传入langchain作为记忆
 async function loadMessagesFromRedis(UserID,ContextID) {
   const client = await getRedisClient();
   const key = redisKeyForThread(UserID,ContextID);
+  console.log("key:", key);
 
-  console.log(key);
-
-  const redisUrl = String(config.redis?.url ?? "");
-  console.log(`[redis] url=${redisUrl}`);
-  const allKeys = await client.keys("*");
-  console.log("[redis] keys=", allKeys);
-
-  
   const rawList = await client.lRange(key, 0, -1);
+  console.log("rawList:", rawList);
   if (!Array.isArray(rawList) || rawList.length === 0) return [];
   const stored = rawList
     .map((item) => {
@@ -182,9 +242,6 @@ export function createRagChain(vectorStore, options = {}) {
     [
       "system",
       [
-        "你是一个基于给定上下文回答问题的助手。",
-        "只能使用上下文中的信息回答；\"。",
-         "并且你要对你的回答做出一些扩展和比较详细的解释；\"。",
         "回答请使用中文。"
         ,
       ].join("\n"),
@@ -222,9 +279,18 @@ export function createRagGraph(vectorStore, options = {}) {
         reducer: messagesStateReducer,
         default: () => [],
       }),
+      // 用户ID 上下文ID
       UserID: Annotation(),
       ContextID: Annotation(),
+
+      //前端输入的问题
       input: Annotation(),
+
+      //路由模型改写之后的问题
+      routerQuestion: Annotation(),
+
+      //路由决策 （改写/保留）
+      routerDecision: Annotation(),
       answer: Annotation(),
       context: Annotation(),
 
@@ -248,19 +314,22 @@ export function createRagGraph(vectorStore, options = {}) {
 
     //初始化图流程编排器
     const graph = new StateGraph(GraphState)
+      .addNode("route_input", createRouteInputNode({ createRouterModel, safeParseJsonObject, SystemMessage, HumanMessage, options }))
       .addNode("hydrate", createHydrateNode({ loadMessagesFromRedis, RemoveMessage, REMOVE_ALL_MESSAGES }))
       .addNode("ingest", createIngestNode({ HumanMessage }))
-      .addNode("rag", createRagNode({ ragChain, AIMessage }))
+      .addNode("rag", createRagNode({ ragChain, AIMessage, computeQuestionMd5Upper, saveQuestionChunkIndex }))
       .addNode("mcp_list", createMcpListNode())
       .addNode("summarize",createSummarizeNode({SystemMessage,RemoveMessage,REMOVE_ALL_MESSAGES,summarizationMiddleware,summaryModel,estimateRedisValueBytes,config,}))
       .addNode("tool",createToolNode({normalizeToolList,createDefaultMcpInvoke,options,}))
       .addNode("decide",createDecideNode({createChatModel,normalizeToolList,safeParseJsonObject,normalizeArgs,isToolNameAllowed,SystemMessage,HumanMessage,options,}))
 
-.addEdge(START, "hydrate")
-.addEdge("hydrate", "ingest")
+
+.addEdge(START, "route_input") // 开始->路由改写
+.addEdge("route_input", "hydrate") // 路由改写->加载历史会话
+.addEdge("hydrate", "ingest")    //加载历史会话 -> 构筑上下文
 // 准备 MCP 工具列表 + 决策
-.addEdge("ingest", "mcp_list")
-.addEdge("mcp_list", "decide")
+.addEdge("ingest", "mcp_list")   //构筑mcp—list
+.addEdge("mcp_list", "decide")   //决策节点，判断是否需要mcplist里面的工具
 
 //条件分支（需要工具才走 tool）
 .addConditionalEdges("decide", (state) => {
@@ -274,8 +343,6 @@ export function createRagGraph(vectorStore, options = {}) {
 
 // 工具执行完成后，再走 rag（或直接 generate，看业务需求）
 .addEdge("tool", "rag")
-
-// 后面不变
 .addEdge("rag", "summarize")
 .addEdge("summarize", END)
       

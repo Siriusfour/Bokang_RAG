@@ -2,7 +2,8 @@
   "ollama": {
     "baseUrl": "http://127.0.0.1:11434",
     "embeddingModel": "nomic-embed-text",  
-    "chatModel": "qwen3:0.6B",               
+    "routerModel": "qwen3:0.6b",
+    "chatModel": "qwen3.5:0.8b",               
     "temperature": 0.2
   },
   "documents": {
@@ -27,11 +28,14 @@
     "textFieldMaxLength": 65535
   },
   "redis": {
-    "url": "redis://127.0.0.1:6379",
+    "url": "redis://localhost:6379",
     "username": "",
     "password": "",
     "db": 0,
-    "keyPrefix": "rag:mem:",
+    "keyPrefix": "RAG_Context:",
+    "chunkIndexPrefix": "RAG_QueryChunkMap:",
+    "chunkIndexVersion": "v1",
+    "chunkIndexTtlSeconds": 2592000,
     "ttlSeconds": 2592000,
     "maxValueBytes": 524288,
     "summaryKeepLastN": 6,

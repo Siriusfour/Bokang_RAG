@@ -127,6 +127,7 @@ export function loadVectorStore(options = {}) {
       username: options.username ?? config.milvus.username,
       password: options.password ?? config.milvus.password,
       ssl: options.ssl ?? config.milvus.ssl,
+      primaryField: options.primaryField ?? "langchain_primaryid",
       textField: options.textField ?? "text",
       vectorField: options.vectorField ?? "vector",
       textFieldMaxLength: options.textFieldMaxLength ?? config.milvus.textFieldMaxLength,

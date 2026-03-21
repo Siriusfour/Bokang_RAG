@@ -39,6 +39,32 @@ async function checkOllamaReady() {
   }
 }
 
+async function ensureOllamaModelsReady() {
+  const baseUrl = String(config.ollama.baseUrl || "").replace(/\/+$/, "");
+  const tagsUrl = `${baseUrl}/api/tags`;
+  const tagsData = await fetch(tagsUrl).then((r) => r.json());
+  const installed = new Set(
+    Array.isArray(tagsData?.models) ? tagsData.models.map((m) => String(m?.name || "").trim()) : []
+  );
+  const candidates = [config.ollama.chatModel, config.ollama.routerModel]
+    .map((m) => String(m || "").trim())
+    .filter(Boolean);
+  const models = [...new Set(candidates)];
+  const missing = [];
+  for (const model of models) {
+    if (installed.has(model)) {
+      console.log(`✅ Ollama 模型已就绪: ${model}`);
+      continue;
+    }
+    missing.push(model);
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Ollama 缺少模型: ${missing.join(", ")}。请先手动执行: ollama pull <model>`
+    );
+  }
+}
+
 function ensureVectorStore() {
   return time("loadDocuments", () => loadDocuments())
     .then((docs) => {
@@ -127,6 +153,7 @@ async function startGrpcServer(ragApp) {
 
 async function main() {
   await time("checkOllamaReady", () => checkOllamaReady());
+  await time("ensureOllamaModelsReady", () => ensureOllamaModelsReady());
   const vectorStore = await time("ensureVectorStore", () => ensureVectorStore());
   const ragApp = await time("createRagGraph", () =>
     createRagGraph(vectorStore, {
