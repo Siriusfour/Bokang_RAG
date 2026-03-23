@@ -3,7 +3,7 @@
     "baseUrl": "http://127.0.0.1:11434",
     "embeddingModel": "nomic-embed-text",  
     "routerModel": "qwen3:0.6b",
-    "chatModel": "qwen3.5:0.8b",               
+    "chatModel": "qwen3:0.6b",               
     "temperature": 0.2
   },
   "documents": {
@@ -33,6 +33,7 @@
     "password": "",
     "db": 0,
     "keyPrefix": "RAG_Context:",
+    "hostQuestionKey": "RAG_HostQuestion",
     "chunkIndexPrefix": "RAG_QueryChunkMap:",
     "chunkIndexVersion": "v1",
     "chunkIndexTtlSeconds": 2592000,

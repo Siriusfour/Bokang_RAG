@@ -126,6 +126,7 @@ export const config = {
     password: getConfig("redis.password", "REDIS_PASSWORD", ""),
     db: getConfig("redis.db", "REDIS_DB", 0),
     keyPrefix: getConfig("redis.keyPrefix", "REDIS_KEY_PREFIX", "RAG_Context:"),
+    hostQuestionKey: getConfig("redis.hostQuestionKey", "REDIS_HOST_QUESTION_KEY", "RAG_HostQuestion"),
     chunkIndexPrefix: getConfig("redis.chunkIndexPrefix", "REDIS_CHUNK_INDEX_PREFIX", "RAG_QueryChunkMap:"),
     chunkIndexVersion: getConfig("redis.chunkIndexVersion", "REDIS_CHUNK_INDEX_VERSION", "v1"),
     chunkIndexTtlSeconds: getConfig("redis.chunkIndexTtlSeconds", "REDIS_CHUNK_INDEX_TTL_SECONDS", 2592000),

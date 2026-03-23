@@ -3,11 +3,11 @@
  * 目标：尽量用 LangChain 现成链路，减少自写 glue code
  */
 
-import { ChatPromptTemplate } from "@langchain/core/prompts";
+import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
 import { AIMessage, HumanMessage, RemoveMessage, SystemMessage } from "@langchain/core/messages";
 import { mapChatMessagesToStoredMessages, mapStoredMessagesToChatMessages } from "@langchain/core/messages";
-import { createClient } from "redis";
 import { createHash } from "node:crypto";
+import { createClient } from "redis";
 import { Annotation, END, REMOVE_ALL_MESSAGES, START, StateGraph, messagesStateReducer } from "@langchain/langgraph";
 import { createStuffDocumentsChain } from "@langchain/classic/chains/combine_documents";
 import { createRetrievalChain } from "@langchain/classic/chains/retrieval";
@@ -15,6 +15,7 @@ import { ChatOllama } from "@langchain/ollama";
 import { ChatOpenAI } from "@langchain/openai";
 import { summarizationMiddleware } from "langchain";
 import { config } from "./config.js";
+import { createPrimaryIdRetriever } from "./buildVectorStore.js";
 import { safeParseJsonObject, normalizeToolList, isToolNameAllowed, normalizeArgs } from "./prase.js";
 import {
   createHydrateNode,
@@ -121,24 +122,13 @@ function redisKeyForThread(UserID,ContextID) {
   return `${prefix}${UserID}:${ContextID}`;
 }
 
-function computeQuestionMd5Upper(question) {
-  return createHash("md5")
-    .update(String(question ?? ""), "utf8")
-    .digest("hex")
-    .toUpperCase();
-}
-
-function redisKeyForQuestionChunkIndex(questionMd5) {
-  const prefix = config.redis?.chunkIndexPrefix ?? "RAG_QueryChunkMap:";
-  return `${prefix}${String(questionMd5 ?? "")}`;
-}
-
-async function saveQuestionChunkIndex({ questionMd5, chunkIds, score }) {
-  if (!questionMd5) return;
-  const client = await getRedisClient();
-  const key = redisKeyForQuestionChunkIndex(questionMd5);
+async function saveHotQuestionToLru({ question, chunkIds, score }) {
+  const text = String(question ?? "").trim();
+  if (!text) return;
+  const questionMd5 = createHash("md5").update(text).digest("hex");
   const orderedChunkIds = Array.isArray(chunkIds) ? chunkIds : [];
   const payload = {
+    question: questionMd5,
     chunk_ids: orderedChunkIds,
     version: String(config.redis?.chunkIndexVersion ?? "v1"),
     ts: Date.now(),
@@ -146,12 +136,51 @@ async function saveQuestionChunkIndex({ questionMd5, chunkIds, score }) {
   if (Number.isFinite(score)) {
     payload.score = score;
   }
-  const ttlSeconds = Number(config.redis?.chunkIndexTtlSeconds ?? config.redis?.ttlSeconds ?? 0);
-  if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
-    await client.set(key, JSON.stringify(payload), { EX: ttlSeconds });
-    return;
+  const client = await getRedisClient();
+  const key = String(config.redis?.hostQuestionKey ?? "RAG_HostQuestion");
+  const rawList = await client.lRange(key, 0, -1);
+  const filtered = rawList.filter((raw) => {
+    try {
+      const parsed = JSON.parse(raw);
+      const existingQuestion = String(parsed?.question ?? "").trim();
+      return existingQuestion !== questionMd5;
+    } catch {
+      return true;
+    }
+  });
+  const nextList = [JSON.stringify(payload), ...filtered].slice(0, 100);
+  const multi = client.multi().del(key);
+  if (nextList.length > 0) {
+    multi.rPush(key, nextList);
   }
-  await client.set(key, JSON.stringify(payload));
+  await multi.exec();
+}
+
+async function resolveChunkIdsByRouterQuestion(routerQuestion) {
+  const text = String(routerQuestion ?? "").trim();
+  if (!text) return [];
+  try {
+    const questionMd5 = createHash("md5").update(text).digest("hex");
+    const client = await getRedisClient();
+    const key = String(config.redis?.hostQuestionKey ?? "RAG_HostQuestion");
+    const rawList = await client.lRange(key, 0, -1);
+    for (const raw of rawList) {
+      try {
+        const parsed = JSON.parse(raw);
+        const hashedQuestion = String(parsed?.question ?? "").trim();
+        if (hashedQuestion !== questionMd5) continue;
+        if (!Array.isArray(parsed?.chunk_ids)) return [];
+        return parsed.chunk_ids
+          .map((id) => String(id ?? "").trim())
+          .filter((id) => id.length > 0);
+      } catch {
+        continue;
+      }
+    }
+    return [];
+  } catch {
+    return [];
+  }
 }
 
 //读取redis的key ， 传入langchain作为记忆
@@ -242,10 +271,23 @@ export function createRagChain(vectorStore, options = {}) {
     [
       "system",
       [
-        "回答请使用中文。"
-        ,
+"你必须严格按照以下格式回答：",
+
+"第一步：复述我的问题（可以优化表达，但不能改变含义）",
+"第二步：再给出答案",
+
+"注意：",
+"- 不允许跳过“问题复述”",
+"- 不允许把复述和答案混在一起",
+"- 必须分成两个明确部分",
+
+"输出格式：",
+
+"【问题理解】",
+"【回答】",
       ].join("\n"),
     ],
+    new MessagesPlaceholder("chat_history"),
     ["human", "问题：{input}\n\n上下文：\n{context}"],
   ]);
 
@@ -253,12 +295,11 @@ export function createRagChain(vectorStore, options = {}) {
     llm,
     prompt,
   }).then((combineDocsChain) => {
-    // Retriever 负责从向量库检索 topK 文档
-    const retriever = vectorStore.asRetriever({
+    const retriever = createPrimaryIdRetriever(vectorStore, {
       k: options.topK ?? config.retrieval.topK,
+      resolveChunkIdsByRouterQuestion,
     });
 
-    // RetrievalChain 将检索结果和问题注入到 prompt，并调用 LLM 生成答案
     return createRetrievalChain({
       retriever,
       combineDocsChain,
@@ -293,6 +334,7 @@ export function createRagGraph(vectorStore, options = {}) {
       routerDecision: Annotation(),
       answer: Annotation(),
       context: Annotation(),
+      chunksID: Annotation(),
 
       mcpTools: Annotation(),     // MCP 列表（数组/字符串）
       toolPlan: Annotation(),     // { needTool, toolName, args, reason }
@@ -314,10 +356,10 @@ export function createRagGraph(vectorStore, options = {}) {
 
     //初始化图流程编排器
     const graph = new StateGraph(GraphState)
-      .addNode("route_input", createRouteInputNode({ createRouterModel, safeParseJsonObject, SystemMessage, HumanMessage, options }))
+      .addNode("route_input", createRouteInputNode({ createRouterModel, safeParseJsonObject, SystemMessage, HumanMessage, getRedisClient, options }))
       .addNode("hydrate", createHydrateNode({ loadMessagesFromRedis, RemoveMessage, REMOVE_ALL_MESSAGES }))
       .addNode("ingest", createIngestNode({ HumanMessage }))
-      .addNode("rag", createRagNode({ ragChain, AIMessage, computeQuestionMd5Upper, saveQuestionChunkIndex }))
+      .addNode("rag", createRagNode({ ragChain, AIMessage, saveHotQuestionToLru }))
       .addNode("mcp_list", createMcpListNode())
       .addNode("summarize",createSummarizeNode({SystemMessage,RemoveMessage,REMOVE_ALL_MESSAGES,summarizationMiddleware,summaryModel,estimateRedisValueBytes,config,}))
       .addNode("tool",createToolNode({normalizeToolList,createDefaultMcpInvoke,options,}))

@@ -5,13 +5,8 @@ export function createHydrateNode({ loadMessagesFromRedis, RemoveMessage, REMOVE
     try {
       const UserID = state?.UserID ?? "default";
       const ContextID = state?.ContextID ?? "default";
-
- 
-
+      
       const restored = await loadMessagesFromRedis(UserID, ContextID);
-
-      console.log("hydrate state:", state);
-      console.log("hydrate restored:", restored);
 
       if (!Array.isArray(restored) || restored.length === 0) {
         return {};
@@ -55,10 +50,31 @@ export function createRouteInputNode({
   safeParseJsonObject,
   SystemMessage,
   HumanMessage,
+  getRedisClient,
   options,
 }) {
   return async (state) => {
-    const input = String(state?.input ?? "");
+    const input = String((state?.input ?? ""));
+    let RAG_HostQuestion = "历史问题列表：[]";
+    try {
+      const client = typeof getRedisClient === "function" ? await getRedisClient() : null;
+      const rawList = client ? await client.lRange("RAG_HostQuestion", 0, -1) : [];
+      const questions = rawList
+        .map((raw) => {
+          try {
+            const parsed = JSON.parse(raw);
+            return String(parsed?.question ?? "").trim();
+          } catch {
+            return "";
+          }
+        })
+        .filter((q) => q.length > 0);
+      const escaped = questions.map((q) => q.replace(/\\/g, "\\\\").replace(/'/g, "\\'"));
+      RAG_HostQuestion = `历史问题列表：[${escaped.map((q) => `'${q}'`).join(", ")}]`;
+    } catch {
+      RAG_HostQuestion = "历史问题列表：[]";
+    }
+
     const routerModel = options?.routerModel;
     if (!routerModel || !String(routerModel).trim()) {
       return {
@@ -69,16 +85,17 @@ export function createRouteInputNode({
     try {
       const llm = createRouterModel(options);
       const system = [
-        "你是问题改写器。",
+        "你是问题匹配器。",
         "我将给你一个问题和一个历史问题的列表，你来确认这个问题是否具有相似的表达和意图问题存在于这个列表",
-        "如果有，则把问题改写成这个相似问题",
+        "如果有，则把问题变成这个相似问题，并且你只需要输出那个匹配的问题，绝对禁止输出其他内容，绝对禁止改写一个字",
         "如果没有，则保持原问题不变",
-        "下面是一个些例子：",
+        "下面是一个些例子可以用于参考：",
         "原始问题：我们公司一个月最多请假多少天？",
         "历史问题列表：['对细菌内毒素检查有影响的因素有哪些？', '一个月最多请多少天假，超过了会怎样？', '我们这边请假和谁请']",
         "推理过程：原始问题与历史问题列表中的第二个问题有相似的表达和意图，都是在询问公司请假的最大天数，第三个问题是一个陷阱，我们需要比较的是一个月最多请假多少天，而不是和谁请假，虽然问题都是与请假有关，但这是两个不同的主题。",
         "改写后的问题：一个月最多请多少天假，超过了会怎样？",
-        "只需要输出改写后的问题，绝对禁止输出其他内容",
+        RAG_HostQuestion,
+        
       ].join("\n");
       const human = input;
       const res = await llm.invoke([
@@ -108,7 +125,7 @@ export function createRouteInputNode({
   };
 }
 
-export function createRagNode({ ragChain, AIMessage, computeQuestionMd5Upper, saveQuestionChunkIndex }) {
+export function createRagNode({ ragChain, AIMessage, saveHotQuestionToLru }) {
   return async (state) => {
     // 如果上一步执行了工具调用，把工具结果拼到本轮问题后面，作为补充上下文输入给 RAG。
     // 目的：让模型在生成最终回答时可以参考工具返回的实时信息。
@@ -124,40 +141,68 @@ const question =
     : state.input;
 
     const queryText = String(question ?? "");
-    const questionMd5 =
-      typeof computeQuestionMd5Upper === "function"
-        ? computeQuestionMd5Upper(queryText)
-        : "";
+    const rawMessages = Array.isArray(state.messages) ? state.messages : [];
+    const normalizedQuestion = queryText.trim();
+    const candidateMessages = rawMessages.filter((msg) => {
+      if (!msg || typeof msg !== "object") return false;
+      const content = typeof msg.content === "string" ? msg.content.trim() : "";
+      const type = typeof msg._getType === "function" ? String(msg._getType()) : "";
+      if (type === "remove") return false;
+      if (!content && type !== "system") return false;
+      return true;
+    });
+    const chatHistory = candidateMessages
+      .filter((msg, index, arr) => {
+        const isLast = index === arr.length - 1;
+        const type = typeof msg._getType === "function" ? String(msg._getType()) : "";
+        const content = typeof msg.content === "string" ? msg.content.trim() : "";
+        if (isLast && type === "human" && content === normalizedQuestion) {
+          return false;
+        }
+        return true;
+      })
+      .slice(-12);
 
-    const res = await ragChain.invoke({ input: `${question}${toolHint}` });
+    const res = await ragChain.invoke({
+      input: `${"问题："+question}${toolHint}`,
+      chat_history: chatHistory,
+      router_question: queryText,
+    });
     console.log("✅ LLM 已返回回答");
     // 兼容不同链返回字段（answer/output），统一转为字符串，避免下游收到非字符串类型。
     const answer = String(res?.answer ?? res?.output ?? "");
     // 检索到的上下文文档列表，写回 state.context 供返回层或调试使用。
     const context = res?.context ?? [];
+    const contextMetadata = (Array.isArray(context) ? context : []).map((doc, index) => ({
+      index,
+      metadata: doc?.metadata ?? null,
+    }));
+    console.log("retrieved context metadata:\n" + JSON.stringify(contextMetadata, null, 2));
+    const chunkIds = (Array.isArray(context) ? context : [])
+      .map((doc) => doc?.metadata?.langchain_primaryid ?? doc?.metadata?.pk ?? doc?.id)
+      .map((id) => String(id ?? "").trim())
+      .filter((id) => id !== null && id !== undefined && String(id).trim() !== "");
     try {
-      if (questionMd5 && typeof saveQuestionChunkIndex === "function") {
-        const chunkIds = (Array.isArray(context) ? context : [])
-          .map((doc) => doc?.metadata?.langchain_primaryid ?? doc?.metadata?.pk)
-          .filter((id) => id !== null && id !== undefined && String(id).trim() !== "");
+      if (typeof saveHotQuestionToLru === "function") {
         const firstScore = (Array.isArray(context) && context.length > 0)
           ? (context[0]?.score ?? context[0]?.metadata?.score)
           : undefined;
         const score = Number(firstScore);
-        await saveQuestionChunkIndex({
-          questionMd5,
+        await saveHotQuestionToLru({
+          question: queryText,
           chunkIds,
           score: Number.isFinite(score) ? score : undefined,
         });
       }
     } catch (e) {
-      console.warn("⚠️ Redis chunk index persist failed:", e?.message ?? e);
+      console.warn("⚠️ Redis persist failed:", e?.message ?? e);
     }
     return {
       // 最终回答文本，供 rpc/cli 直接返回给调用方。
       answer,
       // 本轮命中的检索上下文。
       context,
+      chunksID: chunkIds,
       // 追加一条 AIMessage 到消息状态，用于后续记忆持久化与多轮对话。
       messages: [new AIMessage(answer)],
     };

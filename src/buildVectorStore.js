@@ -6,6 +6,8 @@
  */
 
 import { Milvus } from "@langchain/community/vectorstores/milvus";
+import { Document } from "@langchain/core/documents";
+import { RunnableLambda } from "@langchain/core/runnables";
 import { OllamaEmbeddings } from "@langchain/ollama";
 import { DataType } from "@zilliz/milvus2-sdk-node";
 import { performance } from "node:perf_hooks";
@@ -133,6 +135,135 @@ export function loadVectorStore(options = {}) {
       textFieldMaxLength: options.textFieldMaxLength ?? config.milvus.textFieldMaxLength,
     })
   );
+}
+
+export function createPrimaryIdRetriever(vectorStore, options = {}) {
+  const topK = Number(options.k ?? config.retrieval.topK);
+  const k = Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : 4;
+  let outputFieldsPromise = null;
+  const resolveChunkIdsByRouterQuestion =
+    typeof options.resolveChunkIdsByRouterQuestion === "function"
+      ? options.resolveChunkIdsByRouterQuestion
+      : null;
+
+  const resolveOutputFields = async () => {
+    if (!outputFieldsPromise) {
+      outputFieldsPromise = vectorStore.client
+        .describeCollection({ collection_name: vectorStore.collectionName })
+        .then((desc) => {
+          const schemaFields = Array.isArray(desc?.schema?.fields) ? desc.schema.fields : [];
+          const names = schemaFields
+            .map((field) => field?.name)
+            .filter((name) => typeof name === "string" && name.length > 0 && name !== vectorStore.vectorField);
+          const unique = new Set([vectorStore.primaryField, vectorStore.textField, ...names].filter(Boolean));
+          return Array.from(unique);
+        })
+        .catch(() => [vectorStore.primaryField, vectorStore.textField, "source"].filter(Boolean));
+    }
+    return outputFieldsPromise;
+  };
+
+  const mapRowsToDocuments = (rows, scoreResolver) =>
+    rows.map((row) => {
+      const textValue = row?.[vectorStore.textField] ?? row?.text ?? "";
+      const rawId =
+        row?.[vectorStore.primaryField] ??
+        row?.langchain_primaryid ??
+        row?.pk ??
+        row?.id;
+      const primaryId =
+        rawId === undefined || rawId === null || String(rawId).trim() === ""
+          ? undefined
+          : String(rawId);
+      const metadata = Object.entries(row ?? {}).reduce((acc, [key, value]) => {
+        if (key === "score" || key === vectorStore.textField || key === vectorStore.vectorField) {
+          return acc;
+        }
+        acc[key] = value;
+        return acc;
+      }, {});
+      if (primaryId !== undefined) {
+        metadata.langchain_primaryid = primaryId;
+      }
+      const numericScore = Number(
+        typeof scoreResolver === "function" ? scoreResolver(row, primaryId) : row?.score
+      );
+      if (Number.isFinite(numericScore)) {
+        metadata.score = numericScore;
+      }
+      return new Document({
+        id: primaryId,
+        pageContent: String(textValue ?? ""),
+        metadata,
+      });
+    });
+
+  return RunnableLambda.from(async (input) => {
+    const query =
+      typeof input === "string"
+        ? input
+        : typeof input?.input === "string"
+          ? input.input
+          : String(input ?? "");
+    if (!query.trim()) {
+      return [];
+    }
+    const routerQuestion =
+      typeof input === "object" && input !== null && typeof input?.router_question === "string"
+        ? input.router_question.trim()
+        : "";
+    const output_fields = await resolveOutputFields();
+    if (resolveChunkIdsByRouterQuestion && routerQuestion) {
+      const chunkIds = await resolveChunkIdsByRouterQuestion(routerQuestion);
+      const normalizedChunkIds = Array.isArray(chunkIds)
+        ? chunkIds
+          .map((id) => String(id ?? "").trim())
+          .filter((id) => /^-?\d+$/.test(id))
+        : [];
+      if (normalizedChunkIds.length > 0) {
+        const dedupedChunkIds = [...new Set(normalizedChunkIds)];
+        const expr = `${vectorStore.primaryField} in [${dedupedChunkIds.join(",")}]`;
+        const queryParams = {
+          collection_name: vectorStore.collectionName,
+          expr,
+          output_fields,
+          limit: dedupedChunkIds.length,
+        };
+        if (vectorStore.partitionName) {
+          queryParams.partition_names = [vectorStore.partitionName];
+        }
+        const queryRes = await vectorStore.client.query(queryParams);
+        const queryRows = Array.isArray(queryRes?.data) ? queryRes.data : [];
+        if (queryRows.length > 0) {
+          const idOrder = new Map(normalizedChunkIds.map((id, index) => [id, index]));
+          const docs = mapRowsToDocuments(queryRows, (_row, primaryId) => {
+            const idx = primaryId === undefined ? -1 : idOrder.get(primaryId) ?? -1;
+            return idx >= 0 ? 1 - idx / Math.max(1, normalizedChunkIds.length) : undefined;
+          });
+          docs.sort((a, b) => {
+            const ai = idOrder.get(String(a?.id ?? "")) ?? Number.MAX_SAFE_INTEGER;
+            const bi = idOrder.get(String(b?.id ?? "")) ?? Number.MAX_SAFE_INTEGER;
+            return ai - bi;
+          });
+          return docs;
+        }
+      }
+    }
+    const vector = await vectorStore.embeddings.embedQuery(query);
+    const searchParams = {
+      collection_name: vectorStore.collectionName,
+      vector,
+      anns_field: vectorStore.vectorField,
+      limit: k,
+      output_fields,
+    };
+    if (vectorStore.partitionName) {
+      searchParams.partition_names = [vectorStore.partitionName];
+    }
+    const res = await vectorStore.client.search(searchParams);
+    const rows = Array.isArray(res?.results) ? res.results : [];
+    return mapRowsToDocuments(rows);
+  });
 }
 
 /**
